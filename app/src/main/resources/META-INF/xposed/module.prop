@@ -1,3 +1,9 @@
+id=com.zhitool.rearlyric
+name=ZHITool
+author=XZOWO
+description=小米 17 系列背屏歌词工具：音乐播放时在背屏（副屏）实时重绘逐字歌词页，支持封面取色、息屏继续滚动、锁屏背屏保活。请勾选作用域 System UI / 系统框架(android) / 背屏中心(com.xiaomi.subscreencenter) 与本应用，并配合 lyricon（词幕）使用。
+version=0.1.0
+versionCode=1
 minApiVersion=101
 targetApiVersion=101
 staticScope=true

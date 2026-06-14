@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ZHITool</string>
-    <string name="module_description">小稚的 Xiaomi 17 系列背屏工具</string>
+    <string name="module_description">小米 17 系列背屏歌词工具：背屏实时逐字歌词、封面取色、息屏继续滚动、锁屏背屏保活。需配合 lyricon（词幕）。</string>
 
     <!-- 底部导航 -->
     <string name="nav_home">主页</string>

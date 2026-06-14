@@ -73,12 +73,12 @@ private val OPEN_SOURCE_REFS = listOf(
     OpenSourceRef("AndroidX Palette", "封面取色"),
 )
 
-// 以下入口待发布时填写真实地址（留空则点击提示"敬请期待"）。
-private const val URL_GITHUB = ""    // TODO 发布时填 GitHub 仓库地址
-private const val URL_DOCS = ""      // TODO 项目文档
-private const val URL_AFDIAN = ""    // TODO 爱发电赞助
-private const val URL_QQ_GROUP = ""  // TODO QQ 群聊
-private const val URL_COOLAPK = ""   // TODO 酷安主页
+// 链接入口。
+private const val URL_GITHUB = "https://github.com/XZOWO/ZHITool"
+private const val URL_DOCS = "https://github.com/XZOWO/ZHITool"            // 使用文档 = 项目主页
+private const val URL_AFDIAN = "https://www.ifdian.net/a/XZOWO"
+private const val URL_QQ_GROUP = "https://qun.qq.com/universal-share/share?ac=1&authKey=XF%2BPdk7snLnIgNXJcJ%2Fk%2BgnnnhqkaZMGQj7zTMsbs0t%2BaIxusC7x9%2BzROdVGelJW&busi_data=eyJncm91cENvZGUiOiIyMjg1Njc3NDIiLCJ0b2tlbiI6IkdKK0xGZHRXbnhkc1VrNFJNdERLQWttWG5qbFNONmhicSsrRXNRNTM1d1VOTXZYL29Hejd1WHh3ZUdVbGx2cSsiLCJ1aW4iOiIyNjgxODA5ODA1In0%3D&data=ivy2g_RE6L62kuuQqxNI6oE1DuBEAFES2wj_7aR59T55mKrCSDw7nYPPmgOtS1AUOz9rSkqzBW7hAdv2WyTsaQ&svctype=4&tempid=h5_group_info"
+private const val URL_COOLAPK = "https://www.coolapk.com/u/12965336"
 
 @Composable
 fun AboutScreen(contentPadding: PaddingValues) {
@@ -123,7 +123,7 @@ fun AboutScreen(contentPadding: PaddingValues) {
                     ArrowPreference(title = "GitHub 仓库", summary = "项目开源地址", onClick = { open(URL_GITHUB) })
                     ArrowPreference(title = "项目文档", summary = "使用说明 / 常见问题", onClick = { open(URL_DOCS) })
                     ArrowPreference(title = "爱发电", summary = "赞助支持开发", onClick = { open(URL_AFDIAN) })
-                    ArrowPreference(title = "QQ 群聊", summary = "交流与反馈", onClick = { open(URL_QQ_GROUP) })
+                    ArrowPreference(title = "QQ 群聊", summary = "群号 228567742 · 交流与反馈", onClick = { open(URL_QQ_GROUP) })
                     ArrowPreference(title = "酷安主页", summary = "动态与更新", onClick = { open(URL_COOLAPK) })
                 }
             }
