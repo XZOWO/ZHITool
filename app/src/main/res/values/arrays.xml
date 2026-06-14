@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 作用域：预留给后续魔改（hook 系统框架 / 背屏中心 / 自身自检） -->
+    <string-array name="module_scope">
+        <item>android</item>
+        <item>com.android.systemui</item>
+        <item>com.xiaomi.subscreencenter</item>
+        <item>com.zhitool.rearlyric</item>
+    </string-array>
+</resources>

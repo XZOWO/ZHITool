@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ZHITool</string>
+    <string name="module_description">小稚的 Xiaomi 17 系列背屏工具</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_home">主页</string>
+    <string name="nav_config">配置</string>
+    <string name="nav_about">关于</string>
+</resources>

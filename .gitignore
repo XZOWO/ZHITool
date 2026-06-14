@@ -1,0 +1,30 @@
+# Built application files / generated
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Gradle / Kotlin build caches
+.gradle/
+.kotlin/
+build/
+/captures/
+
+# Local debug scratch (not for publishing)
+.dbg/
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+.cxx/
+.externalNativeBuild/
+
+# Local config & secrets
+local.properties
+*.jks
+*.keystore
+
+# OS
+.DS_Store
+Thumbs.db

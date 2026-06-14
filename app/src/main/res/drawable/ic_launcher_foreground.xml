@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 简洁音符标志 -->
+    <path
+        android:fillColor="#7FB2FF"
+        android:pathData="M62,30 L62,62 a10,8 0 1 1 -6,-7.4 L56,42 L46,45 L46,70 a10,8 0 1 1 -6,-7.4 L40,38 a3,3 0 0 1 2.2,-2.9 L60,32 a3,3 0 0 1 2,2 Z" />
+</vector>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 满幅:前景/背景都用整张图标位图,系统按启动器形状裁切（小米圆角方形≈原图）。 -->
+    <background android:drawable="@mipmap/ic_launcher_foreground" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
