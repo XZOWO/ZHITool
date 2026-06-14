@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -35,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zhitool.rearlyric.BuildConfig
 import com.zhitool.rearlyric.R
+import com.zhitool.rearlyric.update.UpdateChecker
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -89,6 +92,8 @@ fun AboutScreen(contentPadding: PaddingValues) {
     }
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checkingUpdate by remember { mutableStateOf(false) }
     fun open(url: String) {
         if (url.isBlank()) {
             Toast.makeText(context, "敬请期待", Toast.LENGTH_SHORT).show()
@@ -99,6 +104,23 @@ fun AboutScreen(contentPadding: PaddingValues) {
                 Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }.onFailure { Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show() }
+    }
+    fun checkUpdate() {
+        if (checkingUpdate) return
+        checkingUpdate = true
+        Toast.makeText(context, "正在检查更新…", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val info = UpdateChecker.check(force = true)
+            checkingUpdate = false
+            when {
+                info == null -> Toast.makeText(context, "检查失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                info.hasUpdate -> {
+                    Toast.makeText(context, "发现新版本 v${info.versionName}", Toast.LENGTH_SHORT).show()
+                    open(info.releaseUrl.ifBlank { info.apkUrl })
+                }
+                else -> Toast.makeText(context, "已是最新版本", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     val scrollBehavior = MiuixScrollBehavior()
@@ -120,6 +142,11 @@ fun AboutScreen(contentPadding: PaddingValues) {
             item { SmallTitle("链接") }
             item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    ArrowPreference(
+                        title = "检查更新",
+                        summary = if (checkingUpdate) "正在检查…" else "当前 v${BuildConfig.VERSION_NAME}",
+                        onClick = { checkUpdate() },
+                    )
                     ArrowPreference(title = "GitHub 仓库", summary = "项目开源地址", onClick = { open(URL_GITHUB) })
                     ArrowPreference(title = "项目文档", summary = "使用说明 / 常见问题", onClick = { open(URL_DOCS) })
                     ArrowPreference(title = "爱发电", summary = "赞助支持开发", onClick = { open(URL_AFDIAN) })

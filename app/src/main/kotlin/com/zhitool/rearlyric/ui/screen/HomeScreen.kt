@@ -1,6 +1,9 @@
 package com.zhitool.rearlyric.ui.screen
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
@@ -22,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,6 +52,8 @@ import androidx.compose.ui.platform.LocalContext
 import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.LyricBus
 import com.zhitool.rearlyric.lyric.ProjectionState
+import com.zhitool.rearlyric.update.UpdateChecker
+import com.zhitool.rearlyric.update.UpdateInfo
 import io.github.proify.lyricon.lyric.model.Song
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
@@ -80,6 +86,8 @@ fun HomeScreen(
     val projectionEnabled by ProjectionState.enabled.collectAsState()
     val context = LocalContext.current
     val currentLyric = rememberCurrentLyric(song, position)
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    LaunchedEffect(Unit) { updateInfo = UpdateChecker.check() }
     val coverBitmap by produceState<ImageBitmap?>(null, cover) {
         value = cover?.let {
             runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull()
@@ -108,6 +116,9 @@ fun HomeScreen(
                     currentLyric = currentLyric,
                     coverBitmap = coverBitmap,
                 )
+            }
+            updateInfo?.takeIf { it.hasUpdate }?.let { info ->
+                item { UpdateCard(info = info, onOpen = { url -> openUrl(context, url) }) }
             }
             item {
                 Button(
@@ -290,6 +301,68 @@ private fun RotatingCover(bitmap: ImageBitmap, playing: Boolean, size: Dp) {
             .graphicsLayer { rotationZ = angle }
             .clip(CircleShape),
     )
+}
+
+/** 云更新卡片：检测到新版本时显示，提供下载链接（A 档：跳转下载，不静默安装）。 */
+@Composable
+private fun UpdateCard(info: UpdateInfo, onOpen: (String) -> Unit) {
+    Card(
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Rounded.NotificationsActive,
+                    contentDescription = null,
+                    tint = MiuixTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.size(10.dp))
+                Text(
+                    text = "发现新版本 v${info.versionName}",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MiuixTheme.colorScheme.onSurface,
+                )
+            }
+            if (info.changelog.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = info.changelog,
+                    fontSize = 13.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Button(
+                onClick = { onOpen(info.apkUrl.ifBlank { info.releaseUrl }) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColorsPrimary(),
+            ) {
+                Text("下载更新")
+            }
+            if (info.lyriconRequired && info.lyriconApkUrl.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { onOpen(info.lyriconApkUrl) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("同时更新词幕 lyricon")
+                }
+            }
+        }
+    }
+}
+
+private fun openUrl(context: Context, url: String) {
+    if (url.isBlank()) return
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
 }
 
 /** 设备信息卡片（与关于页一致）。 */

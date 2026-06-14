@@ -1,0 +1,12 @@
+{
+  "versionCode": 1,
+  "versionName": "0.1.0",
+  "changelog": "首个公开版本：背屏实时逐字歌词、封面取色、息屏继续滚动、锁屏背屏保活。",
+  "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
+  "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
+  "lyricon": {
+    "required": false,
+    "versionName": "1.0.30-beta13-zh",
+    "apkUrl": "https://github.com/XZOWO/lyricon/releases/latest/download/lyricon-zh-Release.apk"
+  }
+}
