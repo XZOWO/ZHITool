@@ -37,7 +37,7 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 data class AppInfo(val label: String, val pkg: String)
 
-enum class AppPickerMode { FILTER, PACKAGE_STYLE }
+enum class AppPickerMode { FILTER, PACKAGE_STYLE, SELECT }
 
 @Composable
 fun AppPickerScreen(
@@ -47,6 +47,8 @@ fun AppPickerScreen(
     filter: AppFilter? = null,
     onFilterToggle: ((String, Boolean) -> Unit)? = null,
     onAppPicked: ((AppInfo) -> Unit)? = null,
+    selectedApps: Set<String>? = null,
+    onSelectToggle: ((String, Boolean) -> Unit)? = null,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -108,6 +110,15 @@ fun AppPickerScreen(
                                 onClick = {
                                     onAppPicked?.invoke(app)
                                 },
+                            )
+                        }
+
+                        AppPickerMode.SELECT -> {
+                            SwitchPreference(
+                                title = app.label,
+                                summary = app.pkg,
+                                checked = app.pkg in (selectedApps ?: emptySet()),
+                                onCheckedChange = { checked -> onSelectToggle?.invoke(app.pkg, checked) },
                             )
                         }
                     }

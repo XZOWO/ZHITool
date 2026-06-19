@@ -83,5 +83,127 @@
                 android:value="背屏歌词显示" />
         </service>
 
+        <!-- 背屏工具保活/常亮/遮盖检测前台服务 -->
+        <service
+            android:name=".tools.RearToolsService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="背屏常亮与保活" />
+        </service>
+
+        <!-- 控制中心快捷开关：切换至背屏 -->
+        <service
+            android:name=".tools.SwitchToRearTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_switch"
+            android:label="@string/tile_switch"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- 控制中心快捷开关：背屏截图 -->
+        <service
+            android:name=".tools.RearScreenshotTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_screenshot"
+            android:label="@string/tile_screenshot"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- 控制中心快捷开关：背屏录屏 -->
+        <service
+            android:name=".tools.RearScreenRecordTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_record"
+            android:label="@string/tile_record"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- 背屏录屏前台服务（悬浮窗 + screenrecord 纯视频） -->
+        <service
+            android:name=".tools.record.ScreenRecordService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="背屏录屏" />
+        </service>
+
+        <!-- 充电动画背屏页（插/拔电监听在 RearToolsService 运行时注册，manifest 接收器在 Android 8+ 不送达） -->
+        <activity
+            android:name=".tools.charge.RearChargingActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity="com.zhitool.rearlyric.charge"
+            android:theme="@style/Theme.ZHITool.RearTransparent"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|smallestScreenSize|density"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:hardwareAccelerated="true">
+            <meta-data
+                android:name="miui.rear.policy"
+                android:value="miui" />
+        </activity>
+
+        <!-- 背屏通知推送：通知监听服务 + 背屏通知页 -->
+        <service
+            android:name=".tools.notify.ZhiNotificationListener"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <activity
+            android:name=".tools.notify.RearNotificationActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity="com.zhitool.rearlyric.notify"
+            android:theme="@style/Theme.ZHITool.RearTransparent"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|smallestScreenSize|density"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:hardwareAccelerated="true">
+            <meta-data
+                android:name="miui.rear.policy"
+                android:value="miui" />
+        </activity>
+
+        <!-- URI 调用（zhitool:// 与兼容 mrss://），透明、即收即走 -->
+        <activity
+            android:name=".tools.UriReceiverActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:noHistory="true"
+            android:taskAffinity="com.zhitool.rearlyric.uri"
+            android:theme="@style/Theme.ZHITool.RearTransparent">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="zhitool" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mrss" />
+            </intent-filter>
+        </activity>
+
     </application>
 </manifest>

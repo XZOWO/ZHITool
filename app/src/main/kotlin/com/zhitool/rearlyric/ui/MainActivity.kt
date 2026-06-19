@@ -21,9 +21,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Cottage
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
@@ -50,9 +50,11 @@ import com.zhitool.rearlyric.lyric.LyricService
 import com.zhitool.rearlyric.rear.RearProjector
 import com.zhitool.rearlyric.ui.glass.FloatingBottomBar
 import com.zhitool.rearlyric.ui.glass.FloatingBottomBarItem
+import com.zhitool.rearlyric.ui.icons.LyricNoteIcon
 import com.zhitool.rearlyric.ui.screen.AboutScreen
 import com.zhitool.rearlyric.ui.screen.ConfigScreen
 import com.zhitool.rearlyric.ui.screen.HomeScreen
+import com.zhitool.rearlyric.ui.screen.ToolsScreen
 import com.zhitool.rearlyric.ui.theme.ZhiTheme
 import kotlin.concurrent.thread
 import androidx.lifecycle.Lifecycle
@@ -101,7 +103,8 @@ private fun ZhiApp(rootGranted: Boolean) {
     val tabs = remember {
         listOf(
             NavTab("主页", Icons.Rounded.Cottage),
-            NavTab("配置", Icons.Rounded.Tune),
+            NavTab("工具", Icons.Rounded.Build),
+            NavTab("歌词", LyricNoteIcon),
             NavTab("关于", Icons.Rounded.Info),
         )
     }
@@ -148,7 +151,8 @@ private fun ZhiApp(rootGranted: Boolean) {
                             },
                             contentPadding = contentPadding,
                         )
-                        1 -> ConfigScreen(contentPadding)
+                        1 -> ToolsScreen(contentPadding)
+                        2 -> ConfigScreen(contentPadding)
                         else -> AboutScreen(contentPadding)
                     }
                 }

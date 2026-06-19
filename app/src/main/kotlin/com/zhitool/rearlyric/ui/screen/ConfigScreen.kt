@@ -33,7 +33,6 @@ import com.zhitool.rearlyric.lyric.AppFilterState
 import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.CoverPosition
 import com.zhitool.rearlyric.lyric.CoverShape
-import com.zhitool.rearlyric.lyric.HookSettings
 import com.zhitool.rearlyric.lyric.LyricDisplayMode
 import com.zhitool.rearlyric.lyric.LyricFrameRate
 import com.zhitool.rearlyric.lyric.LyricAlign
@@ -65,7 +64,6 @@ fun ConfigScreen(contentPadding: PaddingValues) {
     val baseConfig by RearConfigState.flow.collectAsState()
     val filter by AppFilterState.flow.collectAsState()
     val packageStyles by PackageStyleState.flow.collectAsState()
-    val hookState by HookSettings.flow.collectAsState()
 
     var showFilterPicker by rememberSaveable { mutableStateOf(false) }
     var showPackagePicker by rememberSaveable { mutableStateOf(false) }
@@ -124,7 +122,7 @@ fun ConfigScreen(contentPadding: PaddingValues) {
 
     val scrollBehavior = MiuixScrollBehavior()
     Scaffold(
-        topBar = { TopAppBar(title = "配置", scrollBehavior = scrollBehavior) },
+        topBar = { TopAppBar(title = "歌词", scrollBehavior = scrollBehavior) },
     ) { padding ->
         LazyColumn(
             modifier = Modifier
@@ -193,28 +191,6 @@ fun ConfigScreen(contentPadding: PaddingValues) {
                         title = "封面来源",
                         summary = "LSPosed（SystemUI 媒体会话，字节广播实时推送）",
                         onClick = { },
-                    )
-                }
-            }
-
-            item { SmallTitle("背屏保活（需 LSPosed 启用本模块）") }
-            item {
-                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    SwitchPreference(
-                        title = "锁屏背屏不返回桌面",
-                        summary = "息屏时阻止系统把背屏切回桌面，歌词页保持前台、息屏不再卡住",
-                        checked = hookState.guardSubScreenHome,
-                        onCheckedChange = {
-                            HookSettings.save(context, hookState.copy(guardSubScreenHome = it))
-                        },
-                    )
-                    SwitchPreference(
-                        title = "后台保活",
-                        summary = "把本应用注入系统动态白名单，降低被后台清理概率",
-                        checked = hookState.keepBackground,
-                        onCheckedChange = {
-                            HookSettings.save(context, hookState.copy(keepBackground = it))
-                        },
                     )
                 }
             }

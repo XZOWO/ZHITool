@@ -1,9 +1,11 @@
 package com.zhitool.rearlyric.rear
 
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.compose.runtime.mutableStateOf
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.animateColorAsState
@@ -86,11 +88,16 @@ class RearLyricActivity : ComponentActivity() {
 
     private var selfHealJob: Job? = null
 
+    // 是否已在副屏：未到副屏前作透明、不可触的占位（不渲染内容、不吞正面触控），到副屏才显示。
+    private val onRear = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyLockScreenFlags()
+        RearStage.enter(this)
         LyricBus.rearTaskId.value = taskId
-        setContent { RearLyricScreen() }
+        updateRearGate()
+        setContent { if (onRear.value) RearLyricScreen() }
 
         lifecycleScope.launch {
             LyricBus.projected.collect { projected -> if (!projected) finish() }
@@ -102,11 +109,35 @@ class RearLyricActivity : ComponentActivity() {
         // 锁屏解锁/息屏唤醒后 flags 可能被系统重置，参照 MRSS 在 onResume 重申。
         applyLockScreenFlags()
         LyricBus.rearTaskId.value = taskId
+        updateRearGate()
+        com.zhitool.rearlyric.tools.notify.NotifyBus.pillHostResumed(this)
         ensureOnRearDisplay()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // 任务在屏间移动会触发配置变化（已声明 configChanges 不重建），据此更新占位/显示。
+        updateRearGate()
+    }
+
+    /** 根据当前所在 display 切换「占位(透明不可触)↔显示」。 */
+    private fun updateRearGate() {
+        val rear = currentDisplayId() == REAR_DISPLAY_ID
+        onRear.value = rear
+        val placeholder = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (rear) window.clearFlags(placeholder) else window.addFlags(placeholder)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        com.zhitool.rearlyric.tools.notify.NotifyBus.pillHostPaused(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        RearStage.leave(this)
+        com.zhitool.rearlyric.tools.notify.NotifyBus.pillHostPaused(this)
         if (LyricBus.rearTaskId.value == taskId) LyricBus.rearTaskId.value = -1
     }
 
@@ -323,6 +354,9 @@ private fun RearLyricScreen() {
                 }
             }
         }
+
+        // 背屏通知覆盖层：歌词上方弹胶囊（图标+N条新通知），点击就地铺满成胶囊页，不跳转。
+        com.zhitool.rearlyric.tools.notify.RearNotifyOverlay(modifier = Modifier.fillMaxSize())
 
         // 紧急关闭按钮：左侧摄像头空白区"上二分之一"的正中。正常投在背屏时被
         // 摄像头模组物理遮挡；一旦误投到正面屏幕，点它即可关闭歌词页。

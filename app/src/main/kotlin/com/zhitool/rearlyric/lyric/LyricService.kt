@@ -25,9 +25,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import com.zhitool.rearlyric.core.ForegroundCoordinator
+import com.zhitool.rearlyric.core.ServiceNotice
 import com.zhitool.rearlyric.rear.RearProjector
 import io.github.proify.lyricon.central.BridgeCentral
 import io.github.proify.lyricon.lyric.model.Song
@@ -161,7 +165,9 @@ class LyricService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        _running.value = true
+        ForegroundCoordinator.started(ForegroundCoordinator.TAG_LYRIC)
+        startForeground(SHARED_NOTIF_ID, buildSharedNotification(this))
         startSubscriber()
         registerReceiver(
             screenReceiver,
@@ -196,7 +202,7 @@ class LyricService : Service() {
         serviceScope.launch {
             combine(LyricBus.projected, ProjectionState.enabled) { p, e -> p to e }.collect {
                 runCatching {
-                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
+                    getSystemService(NotificationManager::class.java).notify(SHARED_NOTIF_ID, buildSharedNotification(this@LyricService))
                 }
             }
         }
@@ -416,48 +422,19 @@ class LyricService : Service() {
         }.isSuccess
     }
 
-    private fun buildNotification(): Notification {
-        val nm = getSystemService(NotificationManager::class.java)
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "背屏歌词", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
-        val projected = LyricBus.projected.value
-        val enabled = ProjectionState.current
-        val icon = Icon.createWithResource(this, R.mipmap.ic_launcher_foreground)
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("ZHITool")
-            .setContentText(if (enabled) "背屏歌词运行中" else "已停止投放")
-            .setSmallIcon(R.mipmap.ic_launcher_foreground)
-            .setOngoing(true)
-            .addAction(
-                Notification.Action.Builder(
-                    icon,
-                    if (projected) "收回背屏" else "投到背屏",
-                    notifActionPending(CMD_TOGGLE_PROJECT, 1),
-                ).build()
-            )
-            .addAction(
-                Notification.Action.Builder(
-                    icon,
-                    if (enabled) "停止投放" else "开始投放",
-                    notifActionPending(CMD_TOGGLE_ENABLED, 2),
-                ).build()
-            )
-            .build()
-    }
-
-    private fun notifActionPending(cmd: String, requestCode: Int): PendingIntent =
-        PendingIntent.getBroadcast(
-            this,
-            requestCode,
-            Intent(ACTION_NOTIF).setPackage(packageName).putExtra(EXTRA_NOTIF_CMD, cmd),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-
     override fun onDestroy() {
         super.onDestroy()
+        // 退出前台：若还有别的保活服务在跑，刷新成「无歌词」态并 DETACH 让那条共享通知保留。
+        _running.value = false
+        ForegroundCoordinator.stopped(ForegroundCoordinator.TAG_LYRIC)
+        if (ForegroundCoordinator.othersRunning(ForegroundCoordinator.TAG_LYRIC)) {
+            runCatching {
+                getSystemService(NotificationManager::class.java).notify(SHARED_NOTIF_ID, buildSharedNotification(this))
+            }
+            @Suppress("DEPRECATION") stopForeground(Service.STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION") stopForeground(Service.STOP_FOREGROUND_REMOVE)
+        }
         wakeLoopRunning = false
         wakeHandler.removeCallbacksAndMessages(null)
         rearWakeLock?.takeIf { it.isHeld }?.let { runCatching { it.release() } }
@@ -515,8 +492,52 @@ class LyricService : Service() {
 
     companion object {
         private const val TAG = "ZhiLyricService"
-        private const val CHANNEL_ID = "zhi_lyric"
-        private const val NOTIFICATION_ID = 0x21
+        /** 歌词/工具保活共用的单一前台通知 ID。 */
+        const val SHARED_NOTIF_ID = 0x21
+
+        private val _running = MutableStateFlow(false)
+        /** 歌词服务是否在前台运行（供共享通知决定文案/按钮）。 */
+        val runningFlow: StateFlow<Boolean> get() = _running
+
+        /**
+         * 构建歌词/工具共用的保活通知：歌词在跑时显示「背屏歌词运行中」+投放按钮，
+         * 否则显示「背屏服务运行中」(无按钮)。内容仅取全局状态，故谁来 build 都一致。
+         */
+        fun buildSharedNotification(context: Context): Notification {
+            ServiceNotice.ensureChannel(context)
+            val lyricUp = _running.value
+            val projected = LyricBus.projected.value
+            val enabled = ProjectionState.current
+            val builder = Notification.Builder(context, ServiceNotice.CHANNEL)
+                .setContentTitle("ZHITool")
+                .setContentText(if (lyricUp) (if (enabled) "背屏歌词运行中" else "已停止投放") else "背屏服务运行中")
+                .setSmallIcon(R.mipmap.ic_launcher_foreground)
+                .setGroup(ServiceNotice.GROUP)
+                .setOngoing(true)
+            if (lyricUp) {
+                val icon = Icon.createWithResource(context, R.mipmap.ic_launcher_foreground)
+                builder.addAction(
+                    Notification.Action.Builder(
+                        icon, if (projected) "收回背屏" else "投到背屏",
+                        sharedActionPending(context, CMD_TOGGLE_PROJECT, 1),
+                    ).build(),
+                )
+                builder.addAction(
+                    Notification.Action.Builder(
+                        icon, if (enabled) "停止投放" else "开始投放",
+                        sharedActionPending(context, CMD_TOGGLE_ENABLED, 2),
+                    ).build(),
+                )
+            }
+            return builder.build()
+        }
+
+        private fun sharedActionPending(context: Context, cmd: String, requestCode: Int): PendingIntent =
+            PendingIntent.getBroadcast(
+                context, requestCode,
+                Intent(ACTION_NOTIF).setPackage(context.packageName).putExtra(EXTRA_NOTIF_CMD, cmd),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
 
         /** 背屏防熄屏唤醒间隔（MRSS 用 100ms；我们走 su 管道开销更大，500ms 足够防熄）。 */
         private const val WAKE_INTERVAL_MS = 500L

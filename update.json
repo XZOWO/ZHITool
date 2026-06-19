@@ -1,7 +1,7 @@
 {
-  "versionCode": 1,
-  "versionName": "0.1.0",
-  "changelog": "首个公开版本：背屏实时逐字歌词、封面取色、息屏继续滚动、锁屏背屏保活。",
+  "versionCode": 2,
+  "versionName": "0.1.1",
+  "changelog": "升级为背屏工具箱：新增一键切换应用到背屏 / 返回主屏、背屏截图、背屏录屏（胶囊悬浮窗、可调码率、可内录音频）、背屏 DPI / 旋转、背屏常亮与未投放常亮、背屏遮盖检测、充电动画、背屏通知推送（堆叠浏览）、控制中心磁贴与 zhitool:// URI 调用；UI 改为 主页 / 工具 / 歌词 / 关于 四页；优化投屏避免落到正面、保活通知合并为一条。",
   "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
   "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
   "lyricon": {

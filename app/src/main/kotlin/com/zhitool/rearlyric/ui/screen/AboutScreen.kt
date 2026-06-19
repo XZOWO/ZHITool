@@ -57,8 +57,8 @@ private data class CreditProject(val name: String, val role: String, val url: St
 
 private val CREDIT_PROJECTS = listOf(
     CreditProject("REAREye", "UI 设计 / 背屏保活", "https://github.com/killerprojecte/REAREye"),
-    CreditProject("词幕 Lyricon", "歌词渲染引擎", "https://github.com/tomakino/lyricon"),
-    CreditProject("MRSS", "背屏投放方案", "https://github.com/GoldenglowSusie"),
+    CreditProject("词幕 Lyricon", "背屏歌词数据源", "https://github.com/tomakino/lyricon"),
+    CreditProject("MRSS", "背屏投屏 / 截录 / 充电 / 通知方案", "https://github.com/GoldenglowSusie"),
     CreditProject("LyricProvider", "歌词数据来源", "https://github.com/tomakino/LyricProvider"),
 )
 

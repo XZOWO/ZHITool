@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ZHITool</string>
-    <string name="module_description">小米 17 系列背屏歌词工具：背屏实时逐字歌词、封面取色、息屏继续滚动、锁屏背屏保活。需配合 lyricon（词幕）。</string>
+    <string name="module_description">小米 17 系列背屏工具：一键把应用切到背屏、背屏截图 / 录屏、DPI / 旋转、背屏常亮与保活、充电动画、背屏通知推送、实时背屏歌词，以及控制中心磁贴与 URI 调用。需 Root；背屏歌词需配合 lyricon（词幕）。</string>
 
     <!-- 底部导航 -->
     <string name="nav_home">主页</string>
-    <string name="nav_config">配置</string>
+    <string name="nav_tools">工具</string>
+    <string name="nav_lyric">歌词</string>
     <string name="nav_about">关于</string>
+
+    <!-- 控制中心快捷开关 -->
+    <string name="tile_switch">切换至背屏</string>
+    <string name="tile_screenshot">背屏截图</string>
+    <string name="tile_record">背屏录屏</string>
 </resources>

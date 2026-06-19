@@ -4,6 +4,9 @@ import android.app.Application
 import android.util.Log
 import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.HookSettings
+import com.zhitool.rearlyric.tools.RearToolsService
+import com.zhitool.rearlyric.tools.ToolsConfigStore
+import com.zhitool.rearlyric.tools.notify.NotifyConfigStore
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +18,9 @@ class ZhiApplication : Application() {
         instance = this
         ConfigStore.load(this)
         HookSettings.load(this)
+        ToolsConfigStore.load(this)
+        NotifyConfigStore.load(this)
+        RearToolsService.syncFromConfig(this)
         XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
             override fun onServiceBind(service: XposedService) {
                 Log.i("ZhiApplication", "XposedService bind")
