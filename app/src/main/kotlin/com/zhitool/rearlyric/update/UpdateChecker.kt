@@ -26,12 +26,18 @@ data class UpdateInfo(
 }
 
 /**
- * 应用内云更新检查。数据源为仓库内静态 `update.json`：
- * 主源走 jsDelivr CDN（国内可达、无 GitHub API 限流），raw.githubusercontent 兜底。
- * 只做「检测 + 给下载链接」（A 档），不在应用内静默安装。
+ * 应用内云更新检查。
+ *
+ * **主源 = GitHub Release 资源** `releases/latest/download/update.json`——它由 GitHub 重定向到
+ * **最新一个 release 的附件**，永远是最新版本、**无 CDN 分支缓存**（避免 jsDelivr `@main` 的
+ * 12 小时分支缓存导致刚发版却检测不到）。github 不可达时再退到 jsDelivr（国内可达，但分支缓存
+ * 可能有延迟）与 raw。只做「检测 + 给下载链接」（A 档），不在应用内静默安装。
+ *
+ * 发版须把 `update.json` 同时作为该 release 的资源上传（与仓库根那份内容一致）。
  */
 object UpdateChecker {
     private val SOURCES = listOf(
+        "https://github.com/XZOWO/ZHITool/releases/latest/download/update.json",
         "https://cdn.jsdelivr.net/gh/XZOWO/ZHITool@main/update.json",
         "https://raw.githubusercontent.com/XZOWO/ZHITool/main/update.json",
     )
@@ -59,6 +65,9 @@ object UpdateChecker {
             connectTimeout = 8000
             readTimeout = 8000
             requestMethod = "GET"
+            // releases/latest/download/* 会 302 跳到 objects.githubusercontent.com（同为 https），
+            // 默认即跟随；显式置一下更稳。
+            instanceFollowRedirects = true
         }
         try {
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
