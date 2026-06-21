@@ -33,15 +33,13 @@ import com.zhitool.rearlyric.lyric.AppFilterState
 import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.CoverPosition
 import com.zhitool.rearlyric.lyric.CoverShape
-import com.zhitool.rearlyric.lyric.LyricDisplayMode
 import com.zhitool.rearlyric.lyric.LyricFrameRate
-import com.zhitool.rearlyric.lyric.LyricAlign
+import com.zhitool.rearlyric.lyric.LyricRenderMetrics
 import com.zhitool.rearlyric.lyric.PackageStyle
 import com.zhitool.rearlyric.lyric.PackageStyleState
 import com.zhitool.rearlyric.lyric.RearConfig
 import com.zhitool.rearlyric.lyric.RearConfigState
 import com.zhitool.rearlyric.lyric.TextColorMode
-import java.util.Locale
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -263,19 +261,6 @@ private fun RearConfigEditorContent(
 ) {
     var dialogState by remember { mutableStateOf<ConfigDialogState?>(null) }
 
-    SmallTitle("歌词选项")
-    ConfigLyricModeCard(
-        cfg = cfg,
-        onUpdate = onUpdate,
-        onChoose = { t, current, options, confirm ->
-            dialogState = ConfigDialogState.Choice(
-                title = t,
-                selectedValue = current,
-                options = options,
-                onConfirm = confirm,
-            )
-        },
-    )
     SmallTitle(title)
     ConfigBasicCard(
         cfg = cfg,
@@ -296,14 +281,19 @@ private fun RearConfigEditorContent(
         onEditInt = { t, value, suffix, allowNegative, confirm ->
             dialogState = ConfigDialogState.IntInput(t, value, suffix, allowNegative, confirm)
         },
-        onEditFloat = { t, value, suffix, confirm ->
-            dialogState = ConfigDialogState.FloatInput(t, value, suffix, confirm)
-        },
     )
     SmallTitle("进度高亮")
     ConfigProgressCard(
         cfg = cfg,
         onUpdate = onUpdate,
+    )
+    SmallTitle("安全区与微调")
+    ConfigAdjustCard(
+        cfg = cfg,
+        onUpdate = onUpdate,
+        onEditInt = { t, value, suffix, allowNegative, confirm ->
+            dialogState = ConfigDialogState.IntInput(t, value, suffix, allowNegative, confirm)
+        },
     )
 
     ConfigDialogHost(
@@ -313,63 +303,12 @@ private fun RearConfigEditorContent(
 }
 
 @Composable
-private fun ConfigLyricModeCard(
-    cfg: RearConfig,
-    onUpdate: (RearConfig) -> Unit,
-    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
-) {
-    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
-            title = "歌词模式",
-            summary = when (cfg.displayMode) {
-                LyricDisplayMode.INFO_LYRIC -> "歌曲信息 + 歌词"
-                LyricDisplayMode.FULL_LYRIC -> "全量歌词"
-            },
-            onClick = {
-                onChoose(
-                    "歌词模式",
-                    cfg.displayMode.name,
-                    listOf(
-                        ChoiceItem("歌曲信息 + 歌词", LyricDisplayMode.INFO_LYRIC.name),
-                        ChoiceItem("全量歌词", LyricDisplayMode.FULL_LYRIC.name),
-                    )
-                ) { onUpdate(cfg.copy(displayMode = LyricDisplayMode.valueOf(it))) }
-            },
-        )
-    }
-}
-
-@Composable
 private fun ConfigBasicCard(
     cfg: RearConfig,
     onUpdate: (RearConfig) -> Unit,
     onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
 ) {
-    // 仅"歌曲信息+歌词"模式可调对齐；全量模式跟随歌词数据自身对齐，置灰。
-    val infoOnly = cfg.displayMode == LyricDisplayMode.INFO_LYRIC
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
-            title = "歌词对齐",
-            summary = if (infoOnly) {
-                when (cfg.align) {
-                    LyricAlign.LEFT -> "居左"
-                    LyricAlign.CENTER -> "居中"
-                    LyricAlign.RIGHT -> "居右"
-                }
-            } else "全量模式跟随歌词自身对齐",
-            enabled = infoOnly,
-            onClick = {
-                onChoose(
-                    "歌词对齐",
-                    cfg.align.name,
-                    listOf(
-                        ChoiceItem("居左", LyricAlign.LEFT.name),
-                        ChoiceItem("居中", LyricAlign.CENTER.name),
-                        ChoiceItem("居右", LyricAlign.RIGHT.name),
-                    )
-                ) { onUpdate(cfg.copy(align = LyricAlign.valueOf(it))) }
-            },
-        )
         ArrowPreference(
             title = "封面位置",
             summary = when (cfg.cover) {
@@ -476,23 +415,8 @@ private fun ConfigTextCard(
     cfg: RearConfig,
     onUpdate: (RearConfig) -> Unit,
     onEditInt: (title: String, value: Int, suffix: String, allowNegative: Boolean, onConfirm: (Int) -> Unit) -> Unit,
-    onEditFloat: (title: String, value: Float, suffix: String, onConfirm: (Float) -> Unit) -> Unit,
 ) {
-    // 字号/副歌词比例仅"歌曲信息+歌词"模式生效；全量模式字号自适应、副歌词固定比例，置灰。
-    val infoOnly = cfg.displayMode == LyricDisplayMode.INFO_LYRIC
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
-            title = "主歌词字号",
-            summary = if (infoOnly) "${cfg.fontSize} sp" else "全量模式按一行九字自适应",
-            enabled = infoOnly,
-            onClick = { onEditInt("主歌词字号", cfg.fontSize, "sp", false) { onUpdate(cfg.copy(fontSize = it)) } },
-        )
-        ArrowPreference(
-            title = "副歌词比例",
-            summary = if (infoOnly) formatFloat(cfg.secondaryScale) else "全量模式固定比例",
-            enabled = infoOnly,
-            onClick = { onEditFloat("副歌词比例", cfg.secondaryScale, "") { onUpdate(cfg.copy(secondaryScale = it)) } },
-        )
         SwitchPreference(
             title = "粗体",
             summary = "使用更醒目的字重",
@@ -533,12 +457,60 @@ private fun ConfigProgressCard(
         )
         SwitchPreference(
             title = "相对高亮",
-            summary = if (cfg.displayMode == LyricDisplayMode.FULL_LYRIC) {
-                "汉字逐字点亮（关闭则整词为单位，较粗）"
-            } else "仅全量歌词模式生效",
+            summary = "汉字逐字点亮（关闭则整词为单位，较粗）",
             checked = cfg.relativeHighlight,
-            enabled = cfg.displayMode == LyricDisplayMode.FULL_LYRIC,
             onCheckedChange = { onUpdate(cfg.copy(relativeHighlight = it)) },
+        )
+    }
+}
+
+/**
+ * 安全区与微调：安全区/左右偏移是步进整数（默认 0、可负）；歌词字号(px)/小锁半径(dp)/细线长度(dp)
+ * 是绝对值，默认即当前实际大小。歌词字号默认值取背屏当前自动适配的实际 px（[LyricRenderMetrics]）。
+ */
+@Composable
+private fun ConfigAdjustCard(
+    cfg: RearConfig,
+    onUpdate: (RearConfig) -> Unit,
+    onEditInt: (title: String, value: Int, suffix: String, allowNegative: Boolean, onConfirm: (Int) -> Unit) -> Unit,
+) {
+    val autoTextPx by LyricRenderMetrics.autoTextSizePx.collectAsState()
+    val currentTextPx = if (cfg.lyricTextSize > 0) cfg.lyricTextSize else autoTextPx
+    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+        ArrowPreference(
+            title = "左安全区",
+            summary = cfg.safeAreaLeft.toString(),
+            onClick = { onEditInt("左安全区", cfg.safeAreaLeft, "步", true) { onUpdate(cfg.copy(safeAreaLeft = it)) } },
+        )
+        ArrowPreference(
+            title = "右安全区",
+            summary = cfg.safeAreaRight.toString(),
+            onClick = { onEditInt("右安全区", cfg.safeAreaRight, "步", true) { onUpdate(cfg.copy(safeAreaRight = it)) } },
+        )
+        ArrowPreference(
+            title = "歌词文字大小",
+            summary = if (currentTextPx > 0) "$currentTextPx px" else "自动",
+            onClick = { onEditInt("歌词文字大小", currentTextPx, "px", false) { onUpdate(cfg.copy(lyricTextSize = it)) } },
+        )
+        ArrowPreference(
+            title = "解锁小锁半径",
+            summary = "${cfg.lockSize} dp",
+            onClick = { onEditInt("解锁小锁半径", cfg.lockSize, "dp", false) { onUpdate(cfg.copy(lockSize = it)) } },
+        )
+        ArrowPreference(
+            title = "解锁小锁左右",
+            summary = cfg.lockOffset.toString(),
+            onClick = { onEditInt("解锁小锁左右", cfg.lockOffset, "步", true) { onUpdate(cfg.copy(lockOffset = it)) } },
+        )
+        ArrowPreference(
+            title = "拖动时间左右",
+            summary = cfg.timeOffset.toString(),
+            onClick = { onEditInt("拖动时间左右", cfg.timeOffset, "步", true) { onUpdate(cfg.copy(timeOffset = it)) } },
+        )
+        ArrowPreference(
+            title = "时间细线长度",
+            summary = "${cfg.timeLineLength} dp",
+            onClick = { onEditInt("时间细线长度", cfg.timeLineLength, "dp", false) { onUpdate(cfg.copy(timeLineLength = it)) } },
         )
     }
 }
@@ -552,13 +524,6 @@ private sealed interface ConfigDialogState {
         val suffix: String,
         val allowNegative: Boolean,
         val onConfirm: (Int) -> Unit,
-    ) : ConfigDialogState
-
-    data class FloatInput(
-        val title: String,
-        val value: Float,
-        val suffix: String,
-        val onConfirm: (Float) -> Unit,
     ) : ConfigDialogState
 
     data class Choice(
@@ -592,20 +557,6 @@ private fun ConfigDialogHost(
             onDismissFinished = { rendered = null },
             onConfirm = {
                 it.toIntOrNull()?.let(current.onConfirm)
-                onDismiss()
-            },
-        )
-        is ConfigDialogState.FloatInput -> NumberInputDialog(
-            show = show,
-            title = current.title,
-            initialValue = formatFloat(current.value),
-            suffix = current.suffix,
-            allowNegative = false,
-            allowDecimal = true,
-            onDismiss = onDismiss,
-            onDismissFinished = { rendered = null },
-            onConfirm = {
-                it.replace(',', '.').toFloatOrNull()?.let(current.onConfirm)
                 onDismiss()
             },
         )
@@ -725,5 +676,3 @@ private fun ChoiceDialog(
         }
     }
 }
-
-private fun formatFloat(value: Float): String = String.format(Locale.US, "%.2f", value)

@@ -1,7 +1,7 @@
 {
-  "versionCode": 3,
-  "versionName": "0.1.2",
-  "changelog": "优化应用内检查更新：改为读取 GitHub Release 资源（releases/latest/download/update.json），永远最新、不再受 jsDelivr 分支缓存影响，发版后即时可检测到（github 不可达时回退 jsDelivr / raw）。",
+  "versionCode": 4,
+  "versionName": "0.2.0",
+  "changelog": "这一版为背屏歌词加入了播放控制与进度调整，并微调了界面。\n新增歌曲播放中的控制面板：点击封面放大，可切歌、播放暂停、收藏、调音量，并可拖动进度条。\n新增歌词进度调整：歌词默认锁定，长按约一秒解锁后可上下滑动浏览，点某句即可跳转播放，闲置自动重新锁定。\n新增安全区与多项显示微调；中英文采用不同字号，较长歌名也能完整显示。\n修复大幅调整进度时歌词消失的问题；移除歌曲信息模式，统一为全量滚动歌词。",
   "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
   "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
   "lyricon": {

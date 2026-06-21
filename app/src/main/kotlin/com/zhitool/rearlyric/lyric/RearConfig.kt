@@ -3,19 +3,6 @@ package com.zhitool.rearlyric.lyric
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-/** 歌词显示模式：歌曲信息+歌词（默认布局），或全量歌词（Apple Music 式滚动）。 */
-enum class LyricDisplayMode { INFO_LYRIC, FULL_LYRIC }
-
-/** 歌词对齐方式。 */
-enum class LyricAlign { LEFT, CENTER, RIGHT }
-
-/** 映射到词幕引擎的 horizontalAlign 整数：0=左 1=中 2=右。 */
-fun LyricAlign.toAlignInt(): Int = when (this) {
-    LyricAlign.LEFT -> 0
-    LyricAlign.CENTER -> 1
-    LyricAlign.RIGHT -> 2
-}
-
 /** 封面位置。 */
 enum class CoverPosition { LEFT, NONE, RIGHT }
 
@@ -28,11 +15,8 @@ enum class LyricFrameRate { FPS_120, FPS_60 }
 /** 文字配色模式：默认白 / 提取封面颜色（单色）/ 提取封面渐变色（横向渐变，参照词幕）。 */
 enum class TextColorMode { DEFAULT, COVER, COVER_GRADIENT }
 
-/** 背屏渲染配置。 */
+/** 背屏渲染配置（仅全量歌词模式）。 */
 data class RearConfig(
-    val displayMode: LyricDisplayMode = LyricDisplayMode.FULL_LYRIC,
-    /** 歌词对齐（仅"歌曲信息+歌词"模式；全量模式跟随歌词数据自身对齐）。 */
-    val align: LyricAlign = LyricAlign.CENTER,
     val cover: CoverPosition = CoverPosition.LEFT,
     val coverShape: CoverShape = CoverShape.SQUARE,
     val frameRate: LyricFrameRate = LyricFrameRate.FPS_120,
@@ -41,10 +25,6 @@ data class RearConfig(
     val showSecondary: Boolean = true,
     val showTranslation: Boolean = true,
     val showRoma: Boolean = true,
-    /** 主歌词字号（仅"歌曲信息+歌词"模式；全量模式按一行九个汉字自适应）。 */
-    val fontSize: Int = 60,
-    /** 副歌词相对主歌词比例（仅"歌曲信息+歌词"模式）。 */
-    val secondaryScale: Float = 0.86f,
     val bold: Boolean = true,
     val italic: Boolean = false,
     val fontWeight: Int = 700,
@@ -54,6 +34,21 @@ data class RearConfig(
     val relativeProgress: Boolean = true,
     /** 相对高亮：汉字逐字点亮（关闭则整词为单位，较粗）。 */
     val relativeHighlight: Boolean = true,
+    // ---- 微调 ----
+    /** 左安全区微调（步进，默认 0）：+1 边界右移（歌词右缩）、-1 左移。每步 1dp。 */
+    val safeAreaLeft: Int = 0,
+    /** 右安全区微调（步进，默认 0）：+1 边界右移（歌词右扩）、-1 左移。每步 1dp。 */
+    val safeAreaRight: Int = 0,
+    /** 歌词中文文字大小（绝对像素 px，默认 59）；英文比中文大 4px。0=自动按内容宽适配九字。 */
+    val lyricTextSize: Int = 59,
+    /** 解锁小锁外圈半径（dp，默认 14）；锁体与外圈同步缩放。 */
+    val lockSize: Int = 14,
+    /** 解锁小锁左右微调（步进，默认 0=居中基准）：+1 右、-1 左。每步约 2dp。 */
+    val lockOffset: Int = 0,
+    /** 拖动时间（含细线）左右微调（步进，默认 0=居中基准）：+1 右、-1 左。每步约 2dp。 */
+    val timeOffset: Int = 0,
+    /** 拖动时间细线长度（绝对 dp，默认 32）；左端固定，仅向右伸缩。 */
+    val timeLineLength: Int = 32,
 )
 
 /**

@@ -9,7 +9,7 @@
 **投屏与媒体**
 - 一键把当前前台应用切换到背屏，并可拉回主屏
 - 背屏截图（保存到相册）
-- 背屏录屏：黑色胶囊悬浮窗控制，可调码率，录到 Movies；可选内录系统声音 / 麦克风（合成）
+- 背屏录屏：黑色胶囊悬浮窗控制
 
 **背屏显示控制**
 - 背屏 DPI 调整 / 还原
@@ -31,27 +31,22 @@
 - 支持背屏的小米设备（小米 17 Pro / 17 Pro Max 等）
 - **Root**（Magisk / KernelSU / APatch）
 - LSPosed（背屏保活 hook、封面取色等需要；在作用域勾选 `Android` / `系统界面` / `背屏中心` / 本应用）
-- 背屏歌词功能需安装 [lyricon（词幕）](https://github.com/XZOWO/lyricon)
+- 背屏歌词功能需安装[修改版 lyricon（词幕）](https://github.com/XZOWO/lyricon)，并需安装对应音乐 App 的歌词提供者（provider）[LyricProvider](https://github.com/tomakino/LyricProvider)（负责把各音乐 App 的歌词喂给词幕，缺少 provider 则取不到歌词）
 
 ## 许可证（License）
 
 本项目以 **GNU General Public License v3.0（GPL-3.0）** 发布，完整文本见 [LICENSE](LICENSE)。
 
-之所以采用 GPL-3.0：本项目移植 / 改编了以下 **GPL-3.0** 项目的源码，按 copyleft 要求，整体须以 GPL-3.0 开源：
-
-- 液态玻璃 UI（`app/.../ui/glass/`）、子屏不返回桌面与后台保活 hook（`app/.../xposed/`）移植 / 改编自 **REAREye**。
-- 背屏投影 / 切换 / 截图 / 录屏 / DPI / 旋转 / 充电动画 / 通知推送等思路与流程参考 **MRSS**。
-
 ## 致谢与借鉴（Credits）
 
 本项目站在以下开源项目的肩膀上，特此致谢：
 
-| 项目 | 用途 | 许可证 | 链接 |
-|---|---|---|---|
-| **REAREye** | 液态玻璃 UI、子屏不返回桌面 / 后台保活 hook | GPL-3.0 | https://github.com/killerprojecte/REAREye |
-| **MRSS**（MiRearScreenSwitcher） | 背屏投影 / 切换 / 截录 / 充电动画 / 通知等方案 | GPL-3.0 | https://github.com/GoldenglowSusie |
-| **lyricon（词幕）** | 背屏歌词数据源 / 模型（subscriber、central、model 二进制依赖） | Apache-2.0 | https://github.com/tomakino/lyricon |
-| **LyricProvider** | 各音乐 App 歌词提供者（配套生态） | Apache-2.0 | https://github.com/tomakino/LyricProvider |
+| 项目 | 许可证 | 链接 |
+|---|---|---|
+| **REAREye** | GPL-3.0 | https://github.com/killerprojecte/REAREye |
+| **MRSS**（MiRearScreenSwitcher） | GPL-3.0 | https://github.com/GoldenglowSusie |
+| **lyricon（词幕）** | Apache-2.0 | https://github.com/tomakino/lyricon |
+| **LyricProvider** | Apache-2.0 | https://github.com/tomakino/LyricProvider |
 
 > Apache-2.0 的部分（lyricon / LyricProvider）与 GPL-3.0 单向兼容，已并入本项目；其版权声明与归属见 [NOTICE](NOTICE)。
 

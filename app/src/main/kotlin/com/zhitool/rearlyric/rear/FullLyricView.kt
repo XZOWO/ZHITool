@@ -16,6 +16,8 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.Layout
 import android.text.StaticLayout
@@ -23,11 +25,14 @@ import android.text.TextPaint
 import android.text.TextUtils
 import android.util.AttributeSet
 import android.util.TypedValue
+import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.View
 import androidx.compose.ui.graphics.toArgb
 import com.zhitool.rearlyric.lyric.CoverPosition
 import com.zhitool.rearlyric.lyric.CoverShape
 import com.zhitool.rearlyric.lyric.LyricColors
+import com.zhitool.rearlyric.lyric.LyricRenderMetrics
 import com.zhitool.rearlyric.lyric.RearConfig
 import com.zhitool.rearlyric.lyric.TextColorMode
 import io.github.proify.lyricon.lyric.model.LyricWord
@@ -38,6 +43,7 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -45,6 +51,8 @@ import kotlin.math.roundToInt
 
 /** 固定字号：按一行排满九个汉字计算。 */
 private const val CHARS_PER_LINE = 9
+/** 英文字号比中文大这么多像素（中英文不同字号，视觉更均衡）。 */
+private const val LATIN_EXTRA_PX = 4f
 /** 行内换行的行距倍数与句间距（相对字号）。 */
 private const val LINE_SPACING_MULT = 1.04f
 private const val LINE_GAP_EM = 0.55f
@@ -95,6 +103,19 @@ private const val TITLE_PULSE_BLUR_EM = 0.06f
 private const val DOT_PULSE_PERIOD_MS = 2400.0
 private const val DOT_EXIT_LEAD_MS = 500L
 private const val DOT_MIN_INTRO_MS = 1200L
+
+/** 长按解锁：蓄力时长（圆形进度填满即解锁）、移动取消阈值、解锁后空闲自动回锁、小锁开合动画时长。 */
+private const val UNLOCK_HOLD_MS = 1000L
+private const val UNLOCK_MOVE_CANCEL_DP = 16f
+private const val UNLOCK_IDLE_RELOCK_MS = 6000L
+private const val LOCK_ANIM_MS = 420f
+/** seek 后本地进度覆盖：直播进度回到附近这个窗口内即认为已追上(撤销覆盖)；最长覆盖时长(防卡死)。 */
+private const val SEEK_SETTLE_MS = 1200L
+private const val SEEK_HOLD_MAX_MS = 4000L
+/** 拖动惯性滑动：起飞最小速度(px/s)、指数摩擦系数、停止阈值(px/s)。 */
+private const val FLING_MIN_VELOCITY = 120f
+private const val FLING_FRICTION = 3.2f
+private const val FLING_STOP_VELOCITY = 36f
 
 /** 首句前的封面卡片：封面相对内容宽的比例与上下限（dp，适度调整）。 */
 private const val INTRO_COVER_WIDTH_FRAC = 0.27f
@@ -227,9 +248,81 @@ internal class FullLyricView @JvmOverloads constructor(
     private var dockNameFrom = 1f
     private var dockNameTarget = 1f
     private var dockNameAnimAt = 0L
-    /** 角落封面当前是否已停靠 + 命中区（视图坐标，含封面与左侧文字区，点击切换歌名/时间）。 */
+    /** 封面命中区（视图坐标）：点击封面 → 放大成控制面板（onCoverTap）。 */
+    private val coverHitRect = RectF()
+    /** 角落封面当前是否已停靠 + 文字带命中区（封面左侧文字区，点击切换歌名/时间）。 */
     private var coverDocked = false
-    private val dockedCoverHitRect = RectF()
+    private val textHitRect = RectF()
+
+    /** 点击封面的回调（放大成收藏/切歌/暂停控制面板，由 RearLyricActivity 设置）。 */
+    var onCoverTap: (() -> Unit)? = null
+
+    /** 调整进度回调（点击某句歌词 → MediaControl.seekTo + 起播；拖动松手不 seek）。 */
+    var onSeek: ((Long) -> Unit)? = null
+
+    /**
+     * 拖动浏览时上报「正中那句歌词」的时间，供 RearLyricActivity 在全屏 Compose 层把时间画到
+     * 歌词左侧（可溢出到左侧摄像头空隙，FullLyricView 自身只占右 2/3、画不到那里）。
+     */
+    var onScrubChange: ((active: Boolean, timeMs: Long) -> Unit)? = null
+
+    /**
+     * 长按蓄力/解锁动画的锁视觉参数上报，供 RearLyricActivity 把进度环+小锁画在歌词左侧时间处
+     * （同样在左 1/3 摄像头空隙，本 view 画不到）。visible=false 时隐藏。
+     */
+    var onLockVisual: ((visible: Boolean, ringProgress: Float, ringAlpha: Float, lockOpen: Float, lockAlpha: Float) -> Unit)? = null
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    // ---- 锁定 / 长按解锁 ----
+    /** 歌词默认锁定；长按 2s 解锁后可点击跳转/拖动调整进度，空闲 [UNLOCK_IDLE_RELOCK_MS] 自动回锁。 */
+    private var unlocked = false
+    /** 长按蓄力起点（墙钟，0=未蓄力）；蓄力中左侧时间处画圆形进度+小锁。 */
+    private var pressArmAt = 0L
+    private var pressDownX = 0f
+    private var pressDownY = 0f
+    /** 小锁开/合动画起点（墙钟，0=无）：解锁=开锁动画，回锁=合锁动画。 */
+    private var lockAnimAt = 0L
+    private var lockAnimOpening = true
+    /** 锁视觉上次是否可见（仅在 true→false 时补发一次隐藏，避免每帧回调）。 */
+    private var lockReported = false
+    private val relockRunnable = Runnable { doRelock() }
+    private val unlockRunnable = Runnable { doUnlock() }
+
+    // ---- 拖动调整进度（scrub，自由滚动 + 惯性）----
+    /** 手动浏览中：渲染用 [scrubScroll] 取代直播滚动（手指抓取/惯性/松手停留期间都为 true）。 */
+    private var scrubbing = false
+    /** 手指当前是否按下。 */
+    private var scrubGrabbed = false
+    private var scrubScroll = 0f
+    private var grabScroll = 0f
+    private var lastTouchY = 0f
+    private var movedScrub = false
+    private var scrubCenterIndex = -1
+    /** 惯性滑动：速度（px/s，scrubScroll 方向）与上一帧墙钟。 */
+    private var flinging = false
+    private var flingVel = 0f
+    private var lastFlingAt = 0L
+    private var velocityTracker: VelocityTracker? = null
+
+    // ---- 本地 seek 覆盖（防直播进度未追上前回弹）----
+    private var pendingSeekMs = -1L
+    private var pendingSeekAt = 0L
+
+    /**
+     * 控制面板展开进度（0=正常停靠，1=面板模式）：面板模式下封面回到「首句前大封面」状态
+     * ——复用 dock 动画从角落放大到中央（已是大封面则无动画），旋转角与「封面+歌名/歌手」排版
+     * 全部沿用；歌词整体淡出让位给黑底；退出时封面缩回角落、歌词淡入。由 RearLyricActivity 驱动。
+     */
+    private var panelProgress = 0f
+    private val panelMode get() = panelProgress > 0.01f
+
+    fun setPanelProgress(p: Float) {
+        // 仅记录进度并重绘：封面停靠进度由 coverDockProgress 直接按 panelProgress 同步拉向"大封面"，
+        // 故封面回位/歌名淡出/角落时钟淡出全与面板开合（及底部按键）同步进行，不再滞后。
+        panelProgress = p.coerceIn(0f, 1f)
+        invalidate()
+    }
 
     /** 24 小时时间文字按分钟缓存。 */
     private var clockText = ""
@@ -293,6 +386,20 @@ internal class FullLyricView @JvmOverloads constructor(
         playing: Boolean,
     ) {
         val songChanged = this.song !== song
+        if (songChanged) {
+            // 换歌：退出拖动浏览、回锁、撤销本地 seek 覆盖（新歌重新从锁定态开始）。
+            scrubbing = false
+            scrubGrabbed = false
+            movedScrub = false
+            flinging = false
+            cancelUnlockHold()
+            if (unlocked) {
+                unlocked = false
+                handler.removeCallbacks(relockRunnable)
+            }
+            pendingSeekMs = -1L
+            onScrubChange?.invoke(false, 0L)
+        }
         // 切歌：接下来 SONG_SWITCH_HOLD_MS 内强制新歌按"首句前"渲染（默认从头、显示大封面）。
         if (songChanged && this.song != null) {
             songSwitchHoldUntil = SystemClock.elapsedRealtime() + SONG_SWITCH_HOLD_MS
@@ -318,7 +425,20 @@ internal class FullLyricView @JvmOverloads constructor(
         this.song = song
         // 切歌后 hold 窗口内按进度 0（首句前）渲染，窗口过后再采用新歌真实进度，
         // 滤掉 provider 在 onSongChanged 之后补发的上一首 stale 进度导致的"新歌从旧进度开始"。
-        this.positionMs = if (SystemClock.elapsedRealtime() < songSwitchHoldUntil) 0L else positionMs
+        val now0 = SystemClock.elapsedRealtime()
+        val holdPos = if (now0 < songSwitchHoldUntil) 0L else positionMs
+        // 本地 seek 覆盖：点击/拖动 seek 后，直播进度还没追上目标前先按目标渲染（避免回弹）；
+        // 直播追上（误差 ≤ SEEK_SETTLE_MS）或超时即撤销覆盖、回到直播进度。
+        this.positionMs = if (pendingSeekMs >= 0L) {
+            if (abs(holdPos - pendingSeekMs) <= SEEK_SETTLE_MS || now0 - pendingSeekAt > SEEK_HOLD_MAX_MS) {
+                pendingSeekMs = -1L
+                holdPos
+            } else {
+                pendingSeekMs
+            }
+        } else {
+            holdPos
+        }
         this.config = config
         this.colors = colors
         this.playerPackage = playerPackage
@@ -334,6 +454,7 @@ internal class FullLyricView @JvmOverloads constructor(
             showTranslation = config.showTranslation,
             showRoma = config.showRoma,
             relativeHighlight = config.relativeHighlight,
+            lyricTextSize = config.lyricTextSize,
             playerPackage = playerPackage,
         )
         if (key != layoutKey) {
@@ -341,8 +462,16 @@ internal class FullLyricView @JvmOverloads constructor(
             rebuildLayouts()
         }
         refreshHighlightShader()
-        updateScroll(snap = songChanged)
+        // 拖动浏览期间滚动由手指控制，不让直播进度推动 currentIndex/启动滚动动画。
+        if (!scrubbing) updateScroll(snap = songChanged)
         invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        handler.removeCallbacks(unlockRunnable)
+        handler.removeCallbacks(relockRunnable)
+        recycleVelocity()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -391,24 +520,35 @@ internal class FullLyricView @JvmOverloads constructor(
     }
 
     private fun renderLyrics(canvas: Canvas, now: Long) {
+        // 每帧重置命中区，由封面绘制按当前状态重新设置（无封面/无歌词时为空，不响应点击）。
+        coverHitRect.setEmpty()
+        textHitRect.setEmpty()
         if (models.isEmpty()) {
             // 无歌词：全量模式退化为"封面 + 歌名 + 歌手"居中展示（同歌曲信息模式）。
             drawNoLyricCard(canvas, now)
             return
         }
-        val target = targetScrollFor(currentIndex, now)
+        // 惯性滑动推进（松手后继续滑，丝滑停下）。
+        if (scrubbing && flinging) advanceFling(now)
         val scroll: Float
-        if (scrollAnimating && !lastScroll.isNaN()) {
-            val t = ((now - scrollStartedAt) / SCROLL_DURATION_MS).coerceIn(0f, 1f)
-            if (t >= 1f) {
+        if (scrubbing) {
+            // 拖动浏览：滚动位置由手指/惯性控制，不走句切动画。
+            scrollAnimating = false
+            scroll = scrubScroll
+        } else {
+            val target = targetScrollFor(currentIndex, now)
+            if (scrollAnimating && !lastScroll.isNaN()) {
+                val t = ((now - scrollStartedAt) / SCROLL_DURATION_MS).coerceIn(0f, 1f)
+                if (t >= 1f) {
+                    scrollAnimating = false
+                    scroll = target
+                } else {
+                    scroll = scrollFrom + (target - scrollFrom) * (1f - (1f - t).pow(3))
+                }
+            } else {
                 scrollAnimating = false
                 scroll = target
-            } else {
-                scroll = scrollFrom + (target - scrollFrom) * (1f - (1f - t).pow(3))
             }
-        } else {
-            scrollAnimating = false
-            scroll = target
         }
         lastScroll = scroll
 
@@ -426,18 +566,26 @@ internal class FullLyricView @JvmOverloads constructor(
         )
         canvas.translate(paddingLeft.toFloat(), viewCenter - scroll)
 
-        val first = (currentIndex - DRAW_RADIUS).coerceAtLeast(0)
-        val last = (currentIndex + DRAW_RADIUS).coerceAtMost(models.lastIndex)
-        for (i in first..last) {
-            val top = topOf(i, now)
-            val blockHeight = blockHeightOf(i, now)
-            val norm = abs(top + blockHeight / 2f - scroll) / fadeRange
-            // 当前句与抢唱副句都在演唱：全强度、不渐隐模糊、始终绘制（超长句句内滚动时块心可能远离 scroll）。
-            val isActive = i == currentIndex || i == overlapIndex
-            if (!isActive && norm >= 1f) continue
-            val alphaF = if (isActive) 1f else (1f - norm).pow(FADE_EXPONENT)
-            val blur = if (isActive) null else blurFor(norm)
-            drawLineBlock(canvas, i, top, blockHeight, alphaF, blur, revealFactorAt(i, now), norm, lineScale(i, now))
+        // 控制面板展开：全量滚动歌词不消失，淡到背景亮度（最早方案：歌词放背景），封面/进度条/按键叠其上。
+        val lyricFade = 1f - 0.62f * panelProgress
+        if (lyricFade > 0.01f) {
+            // 绘制窗口以「当前可见滚动位置」为中心，并覆盖 currentIndex。长距离 seek/拖动时滚动动画
+            // 途经的中间句若不在 currentIndex±半径内会整屏空白——这里按可见位置取窗口即可修复。
+            val visualCenter = nearestIndexTo(scroll, now)
+            val anchor = if (currentIndex in models.indices) currentIndex else visualCenter
+            val first = (min(visualCenter, anchor) - DRAW_RADIUS).coerceAtLeast(0)
+            val last = (max(visualCenter, anchor) + DRAW_RADIUS).coerceAtMost(models.lastIndex)
+            for (i in first..last) {
+                val top = topOf(i, now)
+                val blockHeight = blockHeightOf(i, now)
+                val norm = abs(top + blockHeight / 2f - scroll) / fadeRange
+                // 当前句与抢唱副句都在演唱：全强度、不渐隐模糊、始终绘制（超长句句内滚动时块心可能远离 scroll）。
+                val isActive = i == currentIndex || i == overlapIndex
+                if (!isActive && norm >= 1f) continue
+                val alphaF = (if (isActive) 1f else (1f - norm).pow(FADE_EXPONENT)) * lyricFade
+                val blur = if (isActive) null else blurFor(norm)
+                drawLineBlock(canvas, i, top, blockHeight, alphaF, blur, revealFactorAt(i, now), norm, lineScale(i, now))
+            }
         }
         paint.maskFilter = null
         secPaint.maskFilter = null
@@ -454,9 +602,15 @@ internal class FullLyricView @JvmOverloads constructor(
             drawCoverWidget(canvas, now)
         }
 
+        // 长按蓄力/解锁动画：上报锁视觉参数给 Compose（画在左侧歌词时间处，本 view 画不到左 1/3）。
+        reportLockVisual(now)
+
         val revealAnimating = (revealIndex >= 0 && now - revealStartedAt < REVEAL_MS) ||
             (collapseIndex >= 0 && now - collapseStartedAt < REVEAL_MS)
         val zoomAnimating = now - zoomStartedAt < ZOOM_MS.toLong()
+        val lockBusy = pressArmAt != 0L ||
+            (lockAnimAt != 0L && now - lockAnimAt < LOCK_ANIM_MS.toLong()) ||
+            flinging
         val coverAnimating = coverWidgetEnabled && (
             // 停靠/回退动画、停靠后文字淡入、等待去抖回退期间持续重绘。
             (dockAnimAt != 0L && now - dockAnimAt < DOCK_MS.toLong()) ||
@@ -469,7 +623,7 @@ internal class FullLyricView @JvmOverloads constructor(
                 // 歌名显示中（跑马灯/自动切时间计时）持续重绘。
                 (coverDocked && dockNameTarget >= 0.5f)
         )
-        if (scrollAnimating || revealAnimating || zoomAnimating || overlapIndex >= 0 || coverAnimating) {
+        if (scrollAnimating || revealAnimating || zoomAnimating || overlapIndex >= 0 || coverAnimating || lockBusy) {
             postInvalidateOnAnimation()
         }
     }
@@ -484,7 +638,13 @@ internal class FullLyricView @JvmOverloads constructor(
         titlePaint.typeface = typeface
         paint.textSize = 100f
         val sample = paint.measureText("汉") * CHARS_PER_LINE
-        textSizePx = if (sample > 0f) 100f * contentWidth / sample else contentWidth / CHARS_PER_LINE.toFloat()
+        // 排版预留当前句演唱放大量（CURRENT_ZOOM）：按缩小后的宽度适配九字，放大时不会超出右边被裁掉。
+        val wrapWidth = contentWidth / (1f + CURRENT_ZOOM)
+        val autoSize = if (sample > 0f) 100f * wrapWidth / sample else wrapWidth / CHARS_PER_LINE.toFloat()
+        // 回报自动字号(px)，配置页据此把"歌词文字大小"默认显示为当前实际值（而非 0）。
+        LyricRenderMetrics.autoTextSizePx.value = autoSize.roundToInt()
+        // 歌词字号：用户设了绝对 px 则用之，否则用自动适配值。
+        textSizePx = if (config.lyricTextSize > 0) config.lyricTextSize.toFloat() else autoSize
         paint.textSize = textSizePx
         secPaint.textSize = textSizePx * SEC_EM
         titlePaint.textSize = textSizePx * TITLE_EM
@@ -513,6 +673,7 @@ internal class FullLyricView @JvmOverloads constructor(
                 contentWidth = contentWidth.toFloat(),
                 splitCjkWords = config.relativeHighlight,
                 align = lineAligns[i],
+                latinExtraPx = LATIN_EXTRA_PX,
             )
         }
         secEntries = lines.mapIndexed { i, line -> buildSecondaryEntry(line, contentWidth, lineAligns[i]) }
@@ -543,6 +704,16 @@ internal class FullLyricView @JvmOverloads constructor(
         coverDocked = false
     }
 
+    /** 引导卡歌名单次排版（无省略、不限行数，用于自适应缩字号判断真实行数）。 */
+    private fun buildIntroName(text: String, width: Int, size: Float): StaticLayout {
+        introNamePaint.textSize = size
+        return StaticLayout.Builder.obtain(text, 0, text.length, introNamePaint, width)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setIncludePad(false)
+            .setLineSpacing(0f, 1.02f)
+            .build()
+    }
+
     /** 引导卡（首句前）：封面旁的歌名/歌手布局。字号独立于歌词字号，按内容宽适度取值。 */
     private fun buildIntroCard(contentWidth: Int) {
         introNameLayout = null
@@ -552,18 +723,20 @@ internal class FullLyricView @JvmOverloads constructor(
         val typeface = buildTypeface(config)
         introNamePaint.typeface = typeface
         introArtistPaint.typeface = typeface
-        introNamePaint.textSize = textSizePx * INTRO_NAME_EM
         introArtistPaint.textSize = textSizePx * INTRO_ARTIST_EM
         val coverSize = introCoverSizePx()
         val textWidth = (contentWidth - coverSize - textSizePx * INTRO_GAP_EM)
             .toInt().coerceAtLeast(1)
-        introNameLayout = StaticLayout.Builder.obtain(name, 0, name.length, introNamePaint, textWidth)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setIncludePad(false)
-            .setLineSpacing(0f, 1.02f)
-            .setEllipsize(TextUtils.TruncateAt.END)
-            .setMaxLines(2)
-            .build()
+        // 歌名：字号上限=textSizePx*INTRO_NAME_EM，无下限；从上限往下缩，直到整段歌名能在 ≤3 行内完整显示（不省略）。
+        val maxNameSize = textSizePx * INTRO_NAME_EM
+        val nameStep = max(1f, maxNameSize * 0.04f)
+        var nameSize = maxNameSize
+        var nameLayout = buildIntroName(name, textWidth, nameSize)
+        while (nameLayout.lineCount > 3 && nameSize > 6f) {
+            nameSize = (nameSize - nameStep).coerceAtLeast(6f)
+            nameLayout = buildIntroName(name, textWidth, nameSize)
+        }
+        introNameLayout = nameLayout
         introArtistLayout = StaticLayout.Builder.obtain(artist, 0, artist.length, introArtistPaint, textWidth)
             .setAlignment(Layout.Alignment.ALIGN_NORMAL)
             .setIncludePad(false)
@@ -586,8 +759,16 @@ internal class FullLyricView @JvmOverloads constructor(
         contentWidth: Float,
         splitCjkWords: Boolean,
         align: LineAlign,
+        latinExtraPx: Float,
     ): LineModel {
+        val cjkSize = textPaint.textSize
+        val latinSize = cjkSize + latinExtraPx
+        // 行高/基线按较大字号（英文略大），保证大字不被裁；各 token 按自身字号绘制、共用同一基线（底对齐）。
+        textPaint.textSize = max(cjkSize, latinSize)
         val rowHeight = textPaint.fontSpacing * LINE_SPACING_MULT
+        val ascent = -textPaint.ascent()
+        textPaint.textSize = cjkSize
+
         val wordList = words.orEmpty()
         val timed = wordList.isNotEmpty()
         val pieces: List<Token> = if (timed) {
@@ -595,15 +776,27 @@ internal class FullLyricView @JvmOverloads constructor(
         } else {
             splitPlain(lineText).map { Token(text = it) }
         }
-        if (pieces.isEmpty()) return LineModel(emptyList(), rowHeight, 1)
+        if (pieces.isEmpty()) {
+            textPaint.textSize = cjkSize
+            return LineModel(emptyList(), rowHeight, 1)
+        }
 
-        pieces.forEach { it.width = textPaint.measureText(it.text) }
+        // 中文用中文字号、英文/其它用英文字号；按各自字号测宽。
+        pieces.forEach { tok ->
+            tok.size = if (tok.text.any { isCjk(it) }) cjkSize else latinSize
+            textPaint.textSize = tok.size
+            tok.width = textPaint.measureText(tok.text)
+        }
+        textPaint.textSize = cjkSize
 
+        // 换行按预留了当前句放大量的宽度断行（居中/对齐仍用完整 contentWidth），
+        // 这样当前句演唱放大 CURRENT_ZOOM 后仍落在内容区内、不被右侧裁切。
+        val wrapWidth = contentWidth / (1f + CURRENT_ZOOM)
         val rows = ArrayList<MutableList<Token>>()
         var row = mutableListOf<Token>()
         var rowWidth = 0f
         for (tok in pieces) {
-            if (row.isNotEmpty() && rowWidth + tok.width > contentWidth) {
+            if (row.isNotEmpty() && rowWidth + tok.width > wrapWidth) {
                 rows += row
                 row = mutableListOf()
                 rowWidth = 0f
@@ -613,10 +806,10 @@ internal class FullLyricView @JvmOverloads constructor(
         }
         if (row.isNotEmpty()) rows += row
 
-        val ascent = -textPaint.ascent()
         rows.forEachIndexed { r, rowTokens ->
             val rawWidth = rowTokens.sumOf { it.width.toDouble() }.toFloat()
             val lastTok = rowTokens.last()
+            textPaint.textSize = lastTok.size
             val effWidth = rawWidth - (lastTok.width - textPaint.measureText(lastTok.text.trimEnd()))
             var x = when (align) {
                 LineAlign.LEFT -> 0f
@@ -632,6 +825,7 @@ internal class FullLyricView @JvmOverloads constructor(
                 x += tok.width
             }
         }
+        textPaint.textSize = cjkSize
         val tokens = rows.flatten()
         if (!timed) {
             val total = tokens.sumOf { it.width.toDouble() }.toFloat().coerceAtLeast(1f)
@@ -716,6 +910,7 @@ internal class FullLyricView @JvmOverloads constructor(
                         contentWidth = contentWidth.toFloat(),
                         splitCjkWords = false,
                         align = align,
+                        latinExtraPx = 0f,
                     ),
                     layout = null,
                 )
@@ -821,7 +1016,8 @@ internal class FullLyricView @JvmOverloads constructor(
      * 避免闪一下大封面；真正停留在首句前才回退。换歌/尺寸变化（snap）立即就位。
      */
     private fun updateDockTarget(now: Long, snap: Boolean) {
-        val wantDock = currentIndex >= 0
+        // 解锁(进入调整模式)时即使首句前也缩到角落，让出歌词、隐藏圆点；回锁后(仍首句前)恢复大封面+圆点。
+        val wantDock = currentIndex >= 0 || unlocked
         if (wantDock) {
             revertPendingSince = 0L
             if (dockTarget != 1f) setDockTarget(1f, snap, now)
@@ -1019,8 +1215,10 @@ internal class FullLyricView @JvmOverloads constructor(
             paint.color = Color.WHITE
             paint.alpha = (255f * alphaF).roundToInt().coerceIn(0, 255)
             for (tok in model.tokens) {
+                paint.textSize = tok.size
                 canvas.drawText(tok.text, tok.x, tok.baseline + sinkPx, paint)
             }
+            paint.textSize = textSizePx
         }
 
         if (reveal > 0f) {
@@ -1075,16 +1273,24 @@ internal class FullLyricView @JvmOverloads constructor(
         baseAlpha: Float,
         recede: Float,
     ) {
+        val baseSize = textPaint.textSize
         applyHighlight(textPaint, baseAlpha)
-        for (tok in tokens) canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+        for (tok in tokens) {
+            textPaint.textSize = tok.size
+            canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+        }
         textPaint.shader = null
         // 默认白字模式高亮本就是白，不再叠白（否则会抹掉已读透明度）；其它配色才需要"色→白"过渡。
         if (config.textColorMode != TextColorMode.DEFAULT) {
             val whiteBlend = recede.coerceIn(0f, 1f).pow(WHITE_FADE_EXPONENT)
             textPaint.color = Color.WHITE
             textPaint.alpha = (baseAlpha * whiteBlend).roundToInt().coerceIn(0, 255)
-            for (tok in tokens) canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+            for (tok in tokens) {
+                textPaint.textSize = tok.size
+                canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+            }
         }
+        textPaint.textSize = baseSize
     }
 
     /** 渐变进度绘制：基色 + 高亮按词 clip 扫过；[sink] 时未唱文字下沉、唱到时回正。 */
@@ -1096,7 +1302,9 @@ internal class FullLyricView @JvmOverloads constructor(
         hiAlpha: Float,
         sink: Boolean,
     ) {
+        val baseSize = textPaint.textSize
         for (tok in tokens) {
+            textPaint.textSize = tok.size
             // 相对进度关闭：当前词到点即整体点亮（无词内平滑扫过）。
             val sung = positionMs >= tok.end || (!config.relativeProgress && positionMs > tok.begin)
             when {
@@ -1146,6 +1354,7 @@ internal class FullLyricView @JvmOverloads constructor(
             }
         }
         textPaint.shader = null
+        textPaint.textSize = baseSize
     }
 
     /** 未唱文字下沉，唱到时在词长（上限 320ms）内非线性回正。 */
@@ -1270,7 +1479,9 @@ internal class FullLyricView @JvmOverloads constructor(
         val nameW = introNameLayout?.let { layoutWidth(it) } ?: 0f
         val artistW = introArtistLayout?.let { layoutWidth(it) } ?: 0f
         val textW = max(nameW, artistW)
-        val centerY = contentTop + contentHeight / 2f
+        // 无歌词时封面居中；展开面板时上移到「首句前大封面」高度（与有歌词一致），给下方按键让位。
+        val introCenterY = contentTop + contentHeight * INTRO_TOP_FRAC + introCoverSizePx() / 2f
+        val centerY = lerp(contentTop + contentHeight / 2f, introCenterY, panelProgress)
 
         val bmp = coverBitmap
         if (bmp != null && config.cover != CoverPosition.NONE) {
@@ -1282,6 +1493,14 @@ internal class FullLyricView @JvmOverloads constructor(
             val rowLeft = contentLeft + ((contentWidth - rowW) / 2f).coerceAtLeast(0f)
             val coverCx = rowLeft + cover / 2f
             val textLeft = rowLeft + cover + gap
+            // 封面命中区：无歌词卡的居中封面也可点击放大成控制面板。
+            val hitPad = dp(12f)
+            coverHitRect.set(
+                coverCx - cover / 2f - hitPad,
+                centerY - cover / 2f - hitPad,
+                coverCx + cover / 2f + hitPad,
+                centerY + cover / 2f + hitPad,
+            )
             drawCoverBitmap(canvas, bmp, coverCx, centerY, cover, rotationDeg)
             drawIntroText(canvas, textLeft, centerY, 1f)
             val scaleAnimating = coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()
@@ -1342,15 +1561,22 @@ internal class FullLyricView @JvmOverloads constructor(
         val coverCx = lerp(introCoverCx, dockCoverCx, p)
         val coverCy = lerp(introCoverCy, dockCoverCy, p)
 
-        // 命中区（点封面或左侧文字区切换歌名/时间）：停靠超过一半即可点，覆盖封面 + 左侧文字带。
+        // 封面命中区：始终跟随当前绘制的封面（引导卡大封面或角落小封面），点击放大成控制面板。
+        val hitPad = dp(12f)
+        coverHitRect.set(
+            coverCx - coverSize / 2f - hitPad,
+            coverCy - coverSize / 2f - hitPad,
+            coverCx + coverSize / 2f + hitPad,
+            coverCy + coverSize / 2f + hitPad,
+        )
+        // 文字带命中区（点击切换歌名/时间）：仅停靠后、封面左侧的文字区。
         coverDocked = p > 0.6f
         if (coverDocked) {
-            val pad = dp(12f)
-            dockedCoverHitRect.set(
+            textHitRect.set(
                 contentLeft,
-                coverCy - coverSize / 2f - pad,
-                coverCx + coverSize / 2f + pad,
-                coverCy + coverSize / 2f + pad,
+                coverCy - coverSize / 2f - hitPad,
+                coverCx - coverSize / 2f - hitPad,
+                coverCy + coverSize / 2f + hitPad,
             )
         }
 
@@ -1359,25 +1585,33 @@ internal class FullLyricView @JvmOverloads constructor(
         val introAlpha = (1f - p).coerceIn(0f, 1f)
         if (introAlpha > 0.01f) {
             drawIntroText(canvas, textLeft, introCoverCy, introAlpha)
-            // 圆点跟随首句对齐、位于第一句歌词上方（首句以整屏为中心，故用 height/2 定位）。
-            val firstLineTop = height / 2f - lastScroll
-            val dotsY = firstLineTop - textSizePx * 0.55f
-            drawIntroDots(canvas, contentLeft, contentWidth, dotsY, introAlpha)
+            // 圆点跟随首句对齐、位于第一句歌词上方；面板模式下不画圆点（与首句提示无关）。
+            if (!panelMode) {
+                val firstLineTop = height / 2f - lastScroll
+                val dotsY = firstLineTop - textSizePx * 0.55f
+                drawIntroDots(canvas, contentLeft, contentWidth, dotsY, introAlpha)
+            }
         }
 
-        val textAlpha = clockFadeAlpha(now)
+        // 角落歌名/时间：随停靠淡入，随解除停靠（×p）一并淡出，避免硬切（解决"太僵硬"）。
+        val textAlpha = clockFadeAlpha(now) * p
         if (textAlpha > 0.01f) {
-            // 歌名↔时间：自动模式歌名显示 NAME_SHOW_MS 后切时间；点击切换并锁定（手动覆盖）。
-            val showName = when (manualNameOverride) {
-                1 -> true
-                0 -> false
-                else -> now < nameRevealAt + NAME_SHOW_MS
-            }
-            retargetDockName(showName, now)
-            val nameFactor = currentDockNameFactor(now)
             // 文字区在封面左侧：右边界=封面左缘-间距，左边界=内容左缘。
             val rightEdge = coverCx - coverSize / 2f - dp(CLOCK_GAP_DP)
-            drawDockText(canvas, contentLeft, rightEdge, coverCy, textAlpha, nameFactor, now)
+            if (unlocked) {
+                // 解锁后封面左侧提示"歌词已解锁 / 可滑动调整进度"，取代歌名/时间。
+                drawUnlockHint(canvas, contentLeft, rightEdge, coverCy, textAlpha)
+            } else {
+                // 歌名↔时间：自动模式歌名显示 NAME_SHOW_MS 后切时间；点击切换并锁定（手动覆盖）。
+                val showName = when (manualNameOverride) {
+                    1 -> true
+                    0 -> false
+                    else -> now < nameRevealAt + NAME_SHOW_MS
+                }
+                retargetDockName(showName, now)
+                val nameFactor = currentDockNameFactor(now)
+                drawDockText(canvas, contentLeft, rightEdge, coverCy, textAlpha, nameFactor, now)
+            }
         }
     }
 
@@ -1437,6 +1671,33 @@ internal class FullLyricView @JvmOverloads constructor(
         }
     }
 
+    /** 解锁后封面左侧提示：两行右对齐「歌词已解锁 / 可滑动调整进度」，字号自适应可用宽度。 */
+    private fun drawUnlockHint(canvas: Canvas, leftBound: Float, rightEdge: Float, centerY: Float, alpha: Float) {
+        val avail = rightEdge - leftBound
+        if (avail <= 0f) return
+        val l1 = "歌词已解锁"
+        val l2 = "可滑动调整进度"
+        var size = dockCoverSizePx() * CLOCK_TEXT_FRAC * 0.8f
+        clockPaint.textSize = size
+        val longest = max(clockPaint.measureText(l1), clockPaint.measureText(l2))
+        if (longest > avail) {
+            size *= avail / longest
+            clockPaint.textSize = size
+        }
+        val fm = clockPaint.fontMetrics
+        val lineH = -fm.ascent + fm.descent
+        val lineGap = size * 0.28f
+        val blockH = lineH * 2f + lineGap
+        clockPaint.alpha = (255f * alpha).roundToInt().coerceIn(0, 255)
+        canvas.save()
+        canvas.clipRect(leftBound, centerY - blockH, rightEdge, centerY + blockH)
+        var baseline = centerY - blockH / 2f - fm.ascent
+        canvas.drawText(l1, rightEdge - clockPaint.measureText(l1), baseline, clockPaint)
+        baseline += lineH + lineGap
+        canvas.drawText(l2, rightEdge - clockPaint.measureText(l2), baseline, clockPaint)
+        canvas.restore()
+    }
+
     private fun nameArtistText(): String {
         val text = listOf(song?.name.orEmpty(), song?.artist.orEmpty())
             .filter { it.isNotBlank() }
@@ -1445,23 +1706,83 @@ internal class FullLyricView @JvmOverloads constructor(
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-        val inHit = coverDocked && dockedCoverHitRect.contains(event.x, event.y)
-        when (event.action) {
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val inCover = !coverHitRect.isEmpty && coverHitRect.contains(event.x, event.y)
+        // 解锁后封面左侧是"已解锁"提示而非歌名/时间，禁用文字带切换。
+        val inText = !unlocked && coverDocked && !textHitRect.isEmpty && textHitRect.contains(event.x, event.y)
+        when (event.actionMasked) {
             // 必须消费 DOWN 才能收到 UP（非 clickable 的 View 默认 DOWN 返回 false 就收不到后续事件）。
-            android.view.MotionEvent.ACTION_DOWN -> if (inHit) return true
-            android.view.MotionEvent.ACTION_UP -> if (inHit) {
-                // 点封面/时间区：在歌名与时间之间切换并锁定（手动覆盖，不再自动回切）。
-                val showingName = dockNameTarget >= 0.5f
-                if (showingName) {
-                    manualNameOverride = 0
-                } else {
-                    manualNameOverride = 1
-                    nameRevealAt = SystemClock.elapsedRealtime() // 跑马灯从居右重新起步
-                }
-                performClick()
-                invalidate()
+            MotionEvent.ACTION_DOWN -> {
+                if (inCover || inText) return true
+                if (panelMode || models.isEmpty()) return false
+                pressDownX = event.x
+                pressDownY = event.y
+                // 歌词区按下：已解锁→抓取准备自由滑动/点击跳转；锁定→蓄力长按解锁。
+                if (unlocked) grabScrub(event) else armLongPress()
                 return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (pressArmAt != 0L) {
+                    // 蓄力中移动超阈值即取消（避免把拖动误判为长按；背屏被遮挡产生的滑动也不会误解锁）。
+                    if (abs(event.x - pressDownX) > dp(UNLOCK_MOVE_CANCEL_DP) ||
+                        abs(event.y - pressDownY) > dp(UNLOCK_MOVE_CANCEL_DP)
+                    ) {
+                        cancelUnlockHold()
+                    }
+                    return true
+                }
+                if (scrubGrabbed) {
+                    velocityTracker?.addMovement(event)
+                    val dy = event.y - lastTouchY
+                    lastTouchY = event.y
+                    if (!movedScrub && abs(event.y - pressDownY) > dp(6f)) movedScrub = true
+                    if (movedScrub) moveScrub(dy)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                if (inCover) {
+                    // 点封面：放大成控制面板（收藏 / 切歌 / 暂停 + “词”返回）。
+                    onCoverTap?.invoke()
+                    performClick()
+                    return true
+                }
+                if (inText) {
+                    // 点文字带：在歌名与时间之间切换并锁定（手动覆盖，不再自动回切）。
+                    toggleDockName()
+                    performClick()
+                    return true
+                }
+                if (pressArmAt != 0L) {
+                    cancelUnlockHold()
+                    return true
+                }
+                if (scrubGrabbed) {
+                    scrubGrabbed = false
+                    if (movedScrub) {
+                        // 拖动松手：按抬手速度起惯性滑动（丝滑停下），**不 seek**——要点击某句才跳转。
+                        velocityTracker?.addMovement(event)
+                        velocityTracker?.computeCurrentVelocity(1000)
+                        val vy = velocityTracker?.yVelocity ?: 0f
+                        recycleVelocity()
+                        startFling(-vy)
+                        scheduleRelock()
+                    } else {
+                        // 点击某句歌词：跳转到该句并起播。
+                        recycleVelocity()
+                        tapSeek(event.y)
+                    }
+                    performClick()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                cancelUnlockHold()
+                if (scrubGrabbed) {
+                    scrubGrabbed = false
+                    recycleVelocity()
+                    if (movedScrub) scheduleRelock() else exitBrowse()
+                }
             }
         }
         return super.onTouchEvent(event)
@@ -1470,6 +1791,234 @@ internal class FullLyricView @JvmOverloads constructor(
     override fun performClick(): Boolean {
         super.performClick()
         return true
+    }
+
+    // ---- 锁定 / 长按解锁 / 拖动调整进度 ----
+
+    /** 锁定态按下歌词：开始 2s 蓄力，到点 [doUnlock] 解锁。 */
+    private fun armLongPress() {
+        pressArmAt = SystemClock.elapsedRealtime()
+        handler.removeCallbacks(unlockRunnable)
+        handler.postDelayed(unlockRunnable, UNLOCK_HOLD_MS)
+        invalidate()
+    }
+
+    private fun cancelUnlockHold() {
+        if (pressArmAt == 0L) return // 未蓄力
+        pressArmAt = 0L
+        handler.removeCallbacks(unlockRunnable)
+        invalidate()
+    }
+
+    private fun doUnlock() {
+        if (pressArmAt == 0L) return // 已被取消
+        pressArmAt = 0L
+        unlocked = true
+        lockAnimAt = SystemClock.elapsedRealtime()
+        lockAnimOpening = true
+        scheduleRelock()
+        applyUnlockDock(SystemClock.elapsedRealtime())
+        invalidate()
+    }
+
+    private fun doRelock() {
+        if (!unlocked) return
+        unlocked = false
+        // 平滑滚回直播位置：从当前浏览位置启动一次滚动动画（而非硬切）。
+        if (scrubbing && !lastScroll.isNaN()) {
+            scrollFrom = lastScroll
+            scrollAnimating = true
+            scrollStartedAt = SystemClock.elapsedRealtime()
+        }
+        exitBrowse()
+        applyUnlockDock(SystemClock.elapsedRealtime())
+        lockAnimAt = SystemClock.elapsedRealtime()
+        lockAnimOpening = false
+        invalidate()
+    }
+
+    /**
+     * 解锁=进入调整模式：首句前也立即把封面缩到角落（让出歌词、圆点随 introAlpha 淡出）；
+     * 回锁后若仍在首句前则恢复大封面+圆点。立即生效，不依赖 bind 每帧驱动（暂停时 bind 可能不刷）。
+     */
+    private fun applyUnlockDock(now: Long) {
+        val wantDock = currentIndex >= 0 || unlocked
+        revertPendingSince = 0L
+        if (wantDock) {
+            if (dockTarget != 1f) setDockTarget(1f, snap = false, now)
+        } else if (dockTarget != 0f) {
+            setDockTarget(0f, snap = false, now)
+        }
+    }
+
+    private fun scheduleRelock() {
+        handler.removeCallbacks(relockRunnable)
+        handler.postDelayed(relockRunnable, UNLOCK_IDLE_RELOCK_MS)
+    }
+
+    /** 解锁后按下歌词：抓取当前滚动位置作自由滑动基准（松手前不回锁），起 VelocityTracker。 */
+    private fun grabScrub(event: MotionEvent) {
+        scrubGrabbed = true
+        movedScrub = false
+        flinging = false
+        scrubbing = true
+        lastTouchY = event.y
+        val now = SystemClock.elapsedRealtime()
+        grabScroll = if (lastScroll.isNaN()) targetScrollFor(currentIndex, now) else lastScroll
+        scrubScroll = grabScroll
+        handler.removeCallbacks(relockRunnable)
+        recycleVelocity()
+        velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
+    }
+
+    private fun moveScrub(dy: Float) {
+        val now = SystemClock.elapsedRealtime()
+        val (lo, hi) = scrubBounds(now)
+        // 手指下移→更早的歌词（内容随手指走），任意位置自由滑动。
+        scrubScroll = (scrubScroll - dy).coerceIn(lo, hi)
+        reportScrubCenter(now)
+        invalidate()
+    }
+
+    /** 惯性滑动每帧推进：指数摩擦衰减，到边界/速度过小即停。 */
+    private fun advanceFling(now: Long) {
+        if (lastFlingAt == 0L) {
+            lastFlingAt = now
+            return
+        }
+        val dt = ((now - lastFlingAt) / 1000f).coerceIn(0f, 0.05f)
+        lastFlingAt = now
+        val (lo, hi) = scrubBounds(now)
+        scrubScroll += flingVel * dt
+        when {
+            scrubScroll <= lo -> { scrubScroll = lo; flinging = false }
+            scrubScroll >= hi -> { scrubScroll = hi; flinging = false }
+            else -> {
+                flingVel *= exp(-FLING_FRICTION * dt)
+                if (abs(flingVel) < FLING_STOP_VELOCITY) flinging = false
+            }
+        }
+        reportScrubCenter(now)
+    }
+
+    private fun startFling(vel: Float) {
+        if (abs(vel) < FLING_MIN_VELOCITY) {
+            flinging = false // 速度太小不滑，停在原地（仍处浏览态，等点击/回锁）
+            return
+        }
+        flingVel = vel
+        flinging = true
+        lastFlingAt = 0L
+        invalidate()
+    }
+
+    /** 上报「正中那句」的时间给 Compose（拖动/惯性中都刷新）。 */
+    private fun reportScrubCenter(now: Long) {
+        val idx = nearestIndexTo(scrubScroll, now)
+        scrubCenterIndex = idx
+        onScrubChange?.invoke(true, lines.getOrNull(idx)?.begin ?: 0L)
+    }
+
+    /** 点击某句歌词：退出浏览 + 跳转到该句并起播。 */
+    private fun tapSeek(y: Float) {
+        val now = SystemClock.elapsedRealtime()
+        val contentY = y - height / 2f + grabScroll
+        val idx = nearestIndexTo(contentY, now)
+        val begin = lines.getOrNull(idx)?.begin
+        exitBrowse()
+        if (begin != null) {
+            applyLocalSeek(begin)
+            onSeek?.invoke(begin)
+        }
+        scheduleRelock()
+    }
+
+    /** seek 后立即按目标进度渲染（防直播进度未追上前回弹），并触发滚动动画到目标句。 */
+    private fun applyLocalSeek(ms: Long) {
+        pendingSeekMs = ms
+        pendingSeekAt = SystemClock.elapsedRealtime()
+        positionMs = ms
+        if (!scrubbing) updateScroll(snap = false)
+        invalidate()
+    }
+
+    /** 退出手动浏览（停止惯性、回到直播跟随），隐藏左侧时间。 */
+    private fun exitBrowse() {
+        scrubbing = false
+        flinging = false
+        scrubGrabbed = false
+        movedScrub = false
+        scrubCenterIndex = -1
+        onScrubChange?.invoke(false, 0L)
+        invalidate()
+    }
+
+    private fun recycleVelocity() {
+        velocityTracker?.recycle()
+        velocityTracker = null
+    }
+
+    /** 把锁视觉参数上报给 Compose（蓄力进度环/解锁开锁/回锁合锁动画）；仅在 true→false 时补发一次隐藏。 */
+    private fun reportLockVisual(now: Long) {
+        val cb = onLockVisual ?: return
+        if (pressArmAt != 0L) {
+            val p = ((now - pressArmAt) / UNLOCK_HOLD_MS.toFloat()).coerceIn(0f, 1f)
+            cb(true, p, 1f, 0f, 0.5f + 0.5f * p)
+            lockReported = true
+            return
+        }
+        if (lockAnimAt != 0L) {
+            val t = ((now - lockAnimAt) / LOCK_ANIM_MS).coerceIn(0f, 1f)
+            if (t < 1f) {
+                val open = if (lockAnimOpening) smoothstep(t) else 1f - smoothstep(t)
+                val fade = 1f - t
+                cb(true, 1f, fade, open, fade)
+                lockReported = true
+                return
+            }
+            lockAnimAt = 0L
+        }
+        if (lockReported) {
+            cb(false, 0f, 0f, 0f, 0f)
+            lockReported = false
+        }
+    }
+
+    private fun toggleDockName() {
+        val showingName = dockNameTarget >= 0.5f
+        if (showingName) {
+            manualNameOverride = 0
+        } else {
+            manualNameOverride = 1
+            nameRevealAt = SystemClock.elapsedRealtime() // 跑马灯从居右重新起步
+        }
+        invalidate()
+    }
+
+    /** 与某滚动位置最接近的句下标（句中心随下标单调递增，越过最近点后距离只增，可提前结束）。 */
+    private fun nearestIndexTo(scrollY: Float, now: Long): Int {
+        if (models.isEmpty()) return 0
+        var best = 0
+        var bestD = Float.MAX_VALUE
+        for (i in models.indices) {
+            val c = topOf(i, now) + models[i].mainHeight / 2f
+            val d = abs(c - scrollY)
+            if (d <= bestD) {
+                bestD = d
+                best = i
+            } else {
+                break
+            }
+        }
+        return best
+    }
+
+    /** 拖动滚动可达范围：首句中心 → 末句中心。 */
+    private fun scrubBounds(now: Long): Pair<Float, Float> {
+        if (models.isEmpty()) return 0f to 0f
+        val lo = topOf(0, now) + models.first().mainHeight / 2f
+        val hi = topOf(models.lastIndex, now) + models.last().mainHeight / 2f
+        return lo to hi
     }
 
     /** 引导卡的歌名（上）/歌手（下）文字块，竖直居中对齐封面中心。 */
@@ -1564,11 +2113,15 @@ internal class FullLyricView @JvmOverloads constructor(
         lastCoverFrameAt = now
     }
 
-    /** 封面停靠进度：0=引导卡居中，1=角落停靠（from→target easeOutCubic 过渡，可双向）。 */
+    /** 封面停靠进度：0=引导卡居中（大封面），1=角落停靠（from→target easeOutCubic 过渡，可双向）。 */
     private fun coverDockProgress(now: Long): Float {
-        if (dockAnimAt == 0L) return dockTarget
-        val t = ((now - dockAnimAt) / DOCK_MS).coerceIn(0f, 1f)
-        return lerp(dockFrom, dockTarget, easeOutCubic(t))
+        val base = if (dockAnimAt == 0L) {
+            dockTarget
+        } else {
+            lerp(dockFrom, dockTarget, easeOutCubic(((now - dockAnimAt) / DOCK_MS).coerceIn(0f, 1f)))
+        }
+        // 面板展开同步把停靠进度拉向 0（大封面）：封面回位/歌名歌手淡出/角落时钟淡出与面板开合一起进行，不滞后。
+        return base * (1f - panelProgress)
     }
 
     /** 文字（歌名/时间）淡入：停靠到位后才开始（"封面动画完毕后"）；未停靠则隐藏。 */
@@ -1629,6 +2182,8 @@ internal class FullLyricView @JvmOverloads constructor(
         var width: Float = 0f,
         var begin: Long = 0L,
         var end: Long = 0L,
+        /** 该 token 绘制字号（中文=中文字号，英文=中文+[LATIN_EXTRA_PX]）。 */
+        var size: Float = 0f,
     )
 
     private class LineModel(
@@ -1658,6 +2213,7 @@ internal class FullLyricView @JvmOverloads constructor(
         val showTranslation: Boolean,
         val showRoma: Boolean,
         val relativeHighlight: Boolean,
+        val lyricTextSize: Int,
         val playerPackage: String?,
     )
 }
