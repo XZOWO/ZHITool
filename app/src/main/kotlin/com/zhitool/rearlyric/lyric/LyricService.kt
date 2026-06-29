@@ -8,7 +8,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.os.FileObserver
 import android.os.Handler
 import android.os.IBinder
@@ -25,15 +24,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.zhitool.rearlyric.core.MediaControl
 import com.zhitool.rearlyric.core.ForegroundCoordinator
 import com.zhitool.rearlyric.core.ServiceNotice
 import com.zhitool.rearlyric.rear.RearProjector
-import io.github.proify.lyricon.central.BridgeCentral
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.subscriber.ActivePlayerListener
 import io.github.proify.lyricon.subscriber.LyriconFactory
@@ -72,6 +73,10 @@ class LyricService : Service() {
 
     @Volatile
     private var songChangedAtWall = 0L      // System.currentTimeMillis，配封面文件 lastModified
+
+    /** 最近一次「自系统会话直读到进度」的墙钟（elapsedRealtime）；据此把词幕上报的进度退为兜底。 */
+    @Volatile
+    private var lastSessionPlaybackAt = 0L
 
     private fun markSongChanged() {
         songChangedAt = SystemClock.elapsedRealtime()
@@ -168,7 +173,17 @@ class LyricService : Service() {
         _running.value = true
         ForegroundCoordinator.started(ForegroundCoordinator.TAG_LYRIC)
         startForeground(SHARED_NOTIF_ID, buildSharedNotification(this))
-        startSubscriber()
+        applyLyricSource(LyricSourceState.current)
+        // 歌词数据源切换（词幕 ↔ SuperLyric）：启停对应来源并清空旧数据。
+        serviceScope.launch {
+            LyricSourceState.flow.drop(1).collect { applyLyricSource(it) }
+        }
+        // SuperLyric 源是直接写 LyricBus.song（无词幕 onSongChanged），这里据歌曲出现触发自动投放。
+        serviceScope.launch {
+            LyricBus.songFlow.collect { song ->
+                if (LyricSourceState.current == LyricSource.SUPERLYRIC && song != null) maybeAutoProject("superlyric")
+            }
+        }
         registerReceiver(
             screenReceiver,
             IntentFilter().apply {
@@ -188,14 +203,58 @@ class LyricService : Service() {
             IntentFilter(ACTION_NOTIF),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        // 主开关切换：停止→收回；开始→若正在播放有词则重投。
+        // 主开关切换：停止→收回；启动→只要有歌就投（不论播放/暂停，对齐"启动后任何状态都自动投"）。
         serviceScope.launch {
             ProjectionState.enabled.drop(1).collect { enabled ->
                 if (!enabled) {
                     hideRear()
-                } else if (LyricBus.playing.value && LyricBus.song.value != null && allowed()) {
+                } else if (LyricBus.song.value != null && allowed()) {
                     showRear()
                 }
+            }
+        }
+        // 自己掌握播放进度：周期性从系统会话直读进度+播放态喂给 LyricBus，独立于词幕的进度上报。
+        // 词幕只管提供整首逐字歌词；进度由我们读 → 词幕断了/不报进度时歌词仍实时跟着跑（不再靠改版词幕）。
+        var lastSuperTitle: String? = null
+        serviceScope.launch {
+            while (true) {
+                val src = LyricSourceState.current
+                if (src == LyricSource.SUPERLYRIC) {
+                    // SuperLyric 源：进度 + 歌名/歌手/封面都从系统会话取（权威、随切歌可靠变、进度真实可 seek）。
+                    val pb = withContext(Dispatchers.Default) {
+                        MediaControl.readPlayback(this@LyricService, currentPlayerPackage)
+                    }
+                    if (pb != null) {
+                        LyricBus.setPosition(pb.positionMs)
+                        if (LyricBus.playing.value != pb.playing) LyricBus.playing.value = pb.playing
+                        lastSessionPlaybackAt = SystemClock.elapsedRealtime()
+                    }
+                    val meta = withContext(Dispatchers.Default) {
+                        MediaControl.readMetadata(this@LyricService, currentPlayerPackage, withCover = false)
+                    }
+                    // QQ音乐/网易云 等出歌词后会把当前句歌词塞进 TITLE、歌手区变「歌名 - 歌手」；
+                    // 先归一化出真正歌名/歌手（一首歌内稳定），否则每句都被误判成切歌、歌词出不来。
+                    val (realTitle, realArtist) = SuperLyricSource.resolveMeta(meta?.title, meta?.artist)
+                    // 真正歌名变（切歌）才读封面（避免每轮/每句压缩位图）。
+                    if (realTitle != lastSuperTitle) {
+                        lastSuperTitle = realTitle
+                        val cov = withContext(Dispatchers.Default) {
+                            MediaControl.readMetadata(this@LyricService, currentPlayerPackage, withCover = true)?.coverBytes
+                        }
+                        if (cov != null) LyricBus.setCover(cov)
+                    }
+                    SuperLyricSource.onMeta(realTitle, realArtist)
+                } else if (LyricBus.song.value != null) {
+                    val pb = withContext(Dispatchers.Default) {
+                        MediaControl.readPlayback(this@LyricService, currentPlayerPackage)
+                    }
+                    if (pb != null) {
+                        LyricBus.setPosition(pb.positionMs)
+                        if (LyricBus.playing.value != pb.playing) LyricBus.playing.value = pb.playing
+                        lastSessionPlaybackAt = SystemClock.elapsedRealtime()
+                    }
+                }
+                delay(SESSION_POS_POLL_MS)
             }
         }
         // 投放状态/主开关变化时刷新通知按钮文案。
@@ -286,18 +345,49 @@ class LyricService : Service() {
 
     private fun startSubscriber() {
         runCatching {
-            // 若设备未安装独立的 Lyricon 应用，则启动自带的桥接 central。
-            if (!isLyriconInstalled()) {
-                Log.i(TAG, "Lyricon app not found, bootstrapping bundled central")
-                BridgeCentral.initialize(this)
-                BridgeCentral.sendBootCompleted()
-            }
+            // central 由 SystemUI 进程托管：装了词幕用词幕的 central；没装则 ZHITool 的 SystemUI hook 自己起一个
+            // （见 SystemUIHooker.hostCentralIfNeeded）。订阅端只认 SystemUI 的 central，故这里不在本进程起 central
+            // （起了也没人连——历史 bug：自带 central 起错进程）。
             val sub = LyriconFactory.createSubscriber(this)
+            // 连接状态日志：排查"读不到歌词源"——TIMEOUT=SystemUI 里没有可连的 central（词幕没托管/版本不匹配/ZHITool 未起）。
+            sub.addConnectionListener(object : io.github.proify.lyricon.subscriber.ConnectionListener {
+                override fun onConnected(subscriber: LyriconSubscriber) { Log.i(TAG, "central connected") }
+                override fun onReconnected(subscriber: LyriconSubscriber) { Log.i(TAG, "central reconnected") }
+                override fun onDisconnected(subscriber: LyriconSubscriber) { Log.w(TAG, "central disconnected") }
+                override fun onConnectTimeout(subscriber: LyriconSubscriber) {
+                    Log.w(TAG, "central connect TIMEOUT — SystemUI 里没有可连的 central（词幕未托管/版本不匹配/ZHITool 未在 SystemUI 起 central）")
+                }
+            })
             sub.subscribeActivePlayer(playerListener)
             sub.register()
             subscriber = sub
             Log.i(TAG, "Lyricon subscriber registered")
         }.onFailure { Log.e(TAG, "startSubscriber failed", it) }
+    }
+
+    private fun stopSubscriber() {
+        val sub = subscriber ?: return
+        runCatching {
+            sub.unregister()
+            sub.destroy()
+        }
+        subscriber = null
+    }
+
+    /** 按选中的歌词数据源启停对应来源（词幕订阅端 ↔ SuperLyric 接收器），并清空旧来源残留。 */
+    private fun applyLyricSource(source: LyricSource) {
+        Log.i(TAG, "applyLyricSource: $source")
+        LyricBus.reset()
+        when (source) {
+            LyricSource.LYRICON -> {
+                SuperLyricSource.stop()
+                if (subscriber == null) startSubscriber()
+            }
+            LyricSource.SUPERLYRIC -> {
+                stopSubscriber()
+                SuperLyricSource.start()
+            }
+        }
     }
 
     private val playerListener = object : ActivePlayerListener {
@@ -327,8 +417,8 @@ class LyricService : Service() {
             markSongChanged()
             requestCoverFromHook(currentPlayerPackage)
             refreshCover(retry = true)
-            // 每次拿到带歌词的新歌都触发一次投屏（对齐词幕"有显示就投"），按包配置过滤 + 投放主开关。
-            if (song != null && allowed() && ProjectionState.current) showRear()
+            // 拿到新歌即按「主开关 + 包过滤」自动投屏（对齐词幕"有显示就投"）。
+            maybeAutoProject("songChanged")
         }
 
         override fun onReceiveText(text: String?) = Unit
@@ -336,12 +426,18 @@ class LyricService : Service() {
         override fun onPlaybackStateChanged(isPlaying: Boolean) {
             LyricBus.playing.value = isPlaying
             if (isPlaying) refreshCover(retry = false)
-            if (isPlaying && LyricBus.song.value != null && allowed() && ProjectionState.current) showRear()
+            // 开始播放 / 暂停播放都自动投——对齐"启动歌词投放后任何状态都投到背屏"。
+            maybeAutoProject(if (isPlaying) "play" else "pause")
         }
 
-        override fun onPositionChanged(position: Long) = LyricBus.setPosition(position)
+        // 词幕上报的进度仅作兜底：近期能从系统会话直读到进度时（[lastSessionPlaybackAt] 在 TTL 内）以会话为准，忽略词幕进度。
+        override fun onPositionChanged(position: Long) {
+            if (SystemClock.elapsedRealtime() - lastSessionPlaybackAt > SESSION_POS_TTL_MS) LyricBus.setPosition(position)
+        }
 
-        override fun onSeekTo(position: Long) = LyricBus.setPosition(position)
+        override fun onSeekTo(position: Long) {
+            if (SystemClock.elapsedRealtime() - lastSessionPlaybackAt > SESSION_POS_TTL_MS) LyricBus.setPosition(position)
+        }
 
         override fun onDisplayTranslationChanged(isDisplayTranslation: Boolean) = Unit
 
@@ -407,8 +503,21 @@ class LyricService : Service() {
         return null
     }
 
+    /**
+     * 自动投放决策：有歌 + 包过滤允许 + 投放主开关开 → 投屏。每次都打日志（含各门控值），
+     * 便于排查"切歌/播放却没自动投"——一眼看出是主开关关了、还是被"仅监听选中应用"挡了。
+     */
+    private fun maybeAutoProject(reason: String) {
+        val hasSong = LyricBus.song.value != null
+        val allow = allowed()
+        val enabled = ProjectionState.current
+        Log.i(TAG, "auto-project[$reason]: song=$hasSong allowed=$allow enabled=$enabled pkg=$currentPlayerPackage projected=${LyricBus.projected.value}")
+        if (hasSong && allow && enabled) showRear()
+    }
+
     private fun showRear() {
         lastShowAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "showRear -> project to rear")
         projectExecutor.execute { RearProjector.show() }
     }
 
@@ -416,11 +525,6 @@ class LyricService : Service() {
         projectExecutor.execute { RearProjector.hide() }
     }
 
-    private fun isLyriconInstalled(): Boolean = LYRICON_PACKAGES.any { pkg ->
-        runCatching {
-            packageManager.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(0))
-        }.isSuccess
-    }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -448,6 +552,7 @@ class LyricService : Service() {
             subscriber?.destroy()
         }
         subscriber = null
+        runCatching { SuperLyricSource.stop() }
         runCatching {
             coverRefreshToken++
         }
@@ -554,16 +659,16 @@ class LyricService : Service() {
         /** 暂停超过此时长收回背屏（让出原生背屏）；再次播放重投。 */
         private const val PAUSE_RETRACT_MS = 3 * 60 * 1000L
 
+        /** 自系统会话读进度的轮询间隔；以及「多久没读到会话进度就回退用词幕进度」的 TTL。 */
+        private const val SESSION_POS_POLL_MS = 500L
+        private const val SESSION_POS_TTL_MS = 2000L
+
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
 
         private const val ACTION_NOTIF = "com.zhitool.rearlyric.action.NOTIF_CMD"
         private const val EXTRA_NOTIF_CMD = "cmd"
         private const val CMD_TOGGLE_PROJECT = "toggle_project"
         private const val CMD_TOGGLE_ENABLED = "toggle_enabled"
-        private val LYRICON_PACKAGES = listOf(
-            "io.github.proify.lyricon",
-            "io.github.proify.lyricon.core",
-        )
 
         fun start(context: Context) {
             val intent = Intent(context, LyricService::class.java)

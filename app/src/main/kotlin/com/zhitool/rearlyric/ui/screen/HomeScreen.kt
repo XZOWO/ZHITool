@@ -49,9 +49,10 @@ import androidx.compose.ui.unit.sp
 import com.zhitool.rearlyric.BuildConfig
 import com.zhitool.rearlyric.R
 import androidx.compose.ui.platform.LocalContext
-import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.LyricBus
 import com.zhitool.rearlyric.lyric.ProjectionState
+import com.zhitool.rearlyric.lyric.ToolProjectionState
+import com.zhitool.rearlyric.rear.RearProjectionControl
 import com.zhitool.rearlyric.update.UpdateChecker
 import com.zhitool.rearlyric.update.UpdateInfo
 import io.github.proify.lyricon.lyric.model.Song
@@ -72,9 +73,7 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 fun HomeScreen(
     rootGranted: Boolean,
     lyricConnected: Boolean,
-    projected: Boolean,
     lsposedActive: Boolean,
-    onToggleProject: () -> Unit,
     contentPadding: PaddingValues,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
@@ -83,7 +82,11 @@ fun HomeScreen(
     val playing by LyricBus.playingFlow.collectAsState()
     val playerPackage by LyricBus.playerPackage.collectAsState()
     val cover by LyricBus.cover.collectAsState()
-    val projectionEnabled by ProjectionState.enabled.collectAsState()
+    val projected by LyricBus.projected.collectAsState()
+    val lyricEnabled by ProjectionState.enabled.collectAsState()
+    val toolEnabled by ToolProjectionState.enabled.collectAsState()
+    // "所有投放"开关态：歌词主开关或工具开关任一开着即视为"已启动"，offer 停止；都关才 offer 启动。
+    val anyProjectionEnabled = lyricEnabled || toolEnabled
     val context = LocalContext.current
     val currentLyric = rememberCurrentLyric(song, position)
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -120,27 +123,44 @@ fun HomeScreen(
             updateInfo?.takeIf { it.hasUpdate }?.let { info ->
                 item { UpdateCard(info = info, onOpen = { url -> openUrl(context, url) }) }
             }
+            // ① 手动投放当前歌词：投到背屏 ↔ 收回（toggle 当前投放态，不动主开关）。
             item {
                 Button(
-                    onClick = onToggleProject,
+                    onClick = {
+                        if (projected) RearProjectionControl.retractLyrics()
+                        else RearProjectionControl.showLyrics(context)
+                    },
                     enabled = rootGranted,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                     colors = if (projected) ButtonDefaults.buttonColors() else ButtonDefaults.buttonColorsPrimary(),
                 ) {
-                    Text(if (projected) "收回背屏" else "投到背屏")
+                    Text(if (projected) "收回歌词投屏" else "歌词投到背屏")
                 }
             }
+            // ② 歌词自动投放主开关：启动 ↔ 停止（开启后播放/切歌/暂停/启动自动投歌词）。
             item {
                 Button(
-                    onClick = { ConfigStore.saveProjectionEnabled(context, !projectionEnabled) },
+                    onClick = { RearProjectionControl.setLyricEnabled(context, !lyricEnabled) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp),
-                    colors = if (projectionEnabled) ButtonDefaults.buttonColors() else ButtonDefaults.buttonColorsPrimary(),
+                    colors = if (lyricEnabled) ButtonDefaults.buttonColors() else ButtonDefaults.buttonColorsPrimary(),
                 ) {
-                    Text(if (projectionEnabled) "停止投放" else "开始投放")
+                    Text(if (lyricEnabled) "停止歌词投放" else "启动歌词投放")
+                }
+            }
+            // ③ 所有投放总开关：启动 ↔ 停止（歌词 + 充电动画 + 背屏通知一起）。
+            item {
+                Button(
+                    onClick = { RearProjectionControl.setAllEnabled(context, !anyProjectionEnabled) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    colors = if (anyProjectionEnabled) ButtonDefaults.buttonColors() else ButtonDefaults.buttonColorsPrimary(),
+                ) {
+                    Text(if (anyProjectionEnabled) "停止所有投放" else "启动所有投放")
                 }
             }
             item { SmallTitle("状态") }

@@ -15,6 +15,15 @@ enum class LyricFrameRate { FPS_120, FPS_60 }
 /** 文字配色模式：默认白 / 提取封面颜色（单色）/ 提取封面渐变色（横向渐变，参照词幕）。 */
 enum class TextColorMode { DEFAULT, COVER, COVER_GRADIENT }
 
+/** 电池显示：不显示 / 充电时显示（默认）/ 一直显示。在小锁位置画 iOS 式电池（数字，充电未满时带闪电）。 */
+enum class BatteryMode { NONE, WHEN_CHARGING, ALWAYS }
+
+/** 歌词数据源：词幕（lyricon 生态，整首逐字）/ SuperLyric（实时逐句广播）。二选一，默认词幕。 */
+enum class LyricSource { LYRICON, SUPERLYRIC }
+
+/** 歌词动画（目前仅 SuperLyric 单句模式生效）：无 / 随机升起（默认，逐字/逐词随机时序从底部升起）。 */
+enum class LyricAnimation { NONE, RANDOM_RISE }
+
 /** 背屏渲染配置（仅全量歌词模式）。 */
 data class RearConfig(
     val cover: CoverPosition = CoverPosition.LEFT,
@@ -34,6 +43,14 @@ data class RearConfig(
     val relativeProgress: Boolean = true,
     /** 相对高亮：汉字逐字点亮（关闭则整词为单位，较粗）。 */
     val relativeHighlight: Boolean = true,
+    /** 模拟逐字：歌曲只有整句（无逐字时间）时，按时长假装逐字扫过；关闭则整句到点一起切（不假装逐字）。 */
+    val simulateWordTiming: Boolean = true,
+    /** 歌词动画（仅 SuperLyric 单句模式）：当前句进场效果，默认随机升起。 */
+    val lyricAnimation: LyricAnimation = LyricAnimation.RANDOM_RISE,
+    /** 电池显示模式：充电时显示（默认）/ 一直显示 / 不显示。在小锁位置画 iOS 式电池。 */
+    val batteryMode: BatteryMode = BatteryMode.WHEN_CHARGING,
+    /** 播放时充电动画（默认开）：控制播放 + 充电时歌词背后的上升液体波浪是否显示。 */
+    val chargeWave: Boolean = true,
     // ---- 微调 ----
     /** 左安全区微调（步进，默认 0）：+1 边界右移（歌词右缩）、-1 左移。每步 1dp。 */
     val safeAreaLeft: Int = 0,
@@ -84,8 +101,8 @@ object PackageStyleState {
 }
 
 /**
- * 投放主开关：true=允许投放（含播放音乐自动投背屏，默认）；false=停止投放（不自动投、收回当前投放）。
- * 主页"停止投放/开始投放"按钮与通知按钮共用此状态，[ConfigStore] 落盘。
+ * 歌词投放主开关：true=允许（播放/切歌/暂停/启动时自动把歌词投背屏，默认）；false=停止（不自动投、收回当前歌词）。
+ * 主页"启动/停止歌词投放"按钮、通知按钮、以及"启动/停止所有投放"共用此状态，[ConfigStore] 落盘。
  */
 object ProjectionState {
     private val _enabled = MutableStateFlow(true)
@@ -95,6 +112,36 @@ object ProjectionState {
 
     fun update(value: Boolean) {
         _enabled.value = value
+    }
+}
+
+/**
+ * 工具投放开关：true=允许充电动画/背屏通知投到背屏（默认）；false=不投并收回当前。
+ * 仅由主页"启动/停止所有投放"统一控制（与 [ProjectionState] 一起翻），[ConfigStore] 落盘。
+ */
+object ToolProjectionState {
+    private val _enabled = MutableStateFlow(true)
+    val enabled: StateFlow<Boolean> = _enabled
+
+    val current: Boolean get() = _enabled.value
+
+    fun update(value: Boolean) {
+        _enabled.value = value
+    }
+}
+
+/**
+ * 歌词数据源选择（全局，[ConfigStore] 落盘）：[LyricSource.LYRICON] 走词幕订阅端；
+ * [LyricSource.SUPERLYRIC] 走 SuperLyric 实时接收。[LyricService] 据此启停对应来源。
+ */
+object LyricSourceState {
+    private val _flow = MutableStateFlow(LyricSource.LYRICON)
+    val flow: StateFlow<LyricSource> = _flow
+
+    val current: LyricSource get() = _flow.value
+
+    fun update(value: LyricSource) {
+        _flow.value = value
     }
 }
 

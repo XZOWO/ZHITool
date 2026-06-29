@@ -23,6 +23,8 @@ object ConfigStore {
     private const val K_GRADIENT = "gradient_progress"
     private const val K_RELATIVE_PROGRESS = "relative_progress"
     private const val K_RELATIVE_HIGHLIGHT = "relative_highlight"
+    private const val K_SIMULATE_WORD = "simulate_word_timing"
+    private const val K_LYRIC_ANIMATION = "lyric_animation"
     private const val K_SAFE_LEFT = "safe_area_left"
     private const val K_SAFE_RIGHT = "safe_area_right"
     private const val K_LYRIC_TEXT_SIZE = "lyric_text_size"
@@ -30,6 +32,8 @@ object ConfigStore {
     private const val K_LOCK_OFFSET = "lock_offset"
     private const val K_TIME_OFFSET = "time_offset"
     private const val K_TIME_LINE_LEN = "time_line_length"
+    private const val K_BATTERY_MODE = "battery_mode"
+    private const val K_CHARGE_WAVE = "charge_wave"
     private const val K_CFG_VERSION = "config_version"
     /** 配置版本：升到 1 时一次性重定基（安全区/小锁/时间偏移归 0）+ 刷新绝对默认（字号 59/小锁 14/细线 32）。 */
     private const val CFG_VERSION = 1
@@ -37,6 +41,8 @@ object ConfigStore {
     private const val K_SELECTED_APPS = "selected_apps"
     private const val K_PACKAGE_STYLES = "package_styles"
     private const val K_PROJECTION_ENABLED = "projection_enabled"
+    private const val K_TOOL_PROJECTION_ENABLED = "tool_projection_enabled"
+    private const val K_LYRIC_SOURCE = "lyric_source"
 
     fun load(context: Context) {
         val sp = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -56,6 +62,8 @@ object ConfigStore {
                 gradientProgress = sp.getBoolean(K_GRADIENT, true),
                 relativeProgress = sp.getBoolean(K_RELATIVE_PROGRESS, true),
                 relativeHighlight = sp.getBoolean(K_RELATIVE_HIGHLIGHT, true),
+                simulateWordTiming = sp.getBoolean(K_SIMULATE_WORD, true),
+                lyricAnimation = LyricAnimation.entries.getOrElse(sp.getInt(K_LYRIC_ANIMATION, LyricAnimation.RANDOM_RISE.ordinal)) { LyricAnimation.RANDOM_RISE },
                 safeAreaLeft = sp.getInt(K_SAFE_LEFT, 0),
                 safeAreaRight = sp.getInt(K_SAFE_RIGHT, 0),
                 lyricTextSize = sp.getInt(K_LYRIC_TEXT_SIZE, 59),
@@ -63,6 +71,8 @@ object ConfigStore {
                 lockOffset = sp.getInt(K_LOCK_OFFSET, 0),
                 timeOffset = sp.getInt(K_TIME_OFFSET, 0),
                 timeLineLength = sp.getInt(K_TIME_LINE_LEN, 32),
+                batteryMode = BatteryMode.entries.getOrElse(sp.getInt(K_BATTERY_MODE, BatteryMode.WHEN_CHARGING.ordinal)) { BatteryMode.WHEN_CHARGING },
+                chargeWave = sp.getBoolean(K_CHARGE_WAVE, true),
             )
         )
         AppFilterState.update(
@@ -73,6 +83,10 @@ object ConfigStore {
         )
         PackageStyleState.update(loadPackageStyles(sp.getString(K_PACKAGE_STYLES, null)))
         ProjectionState.update(sp.getBoolean(K_PROJECTION_ENABLED, true))
+        ToolProjectionState.update(sp.getBoolean(K_TOOL_PROJECTION_ENABLED, true))
+        LyricSourceState.update(
+            LyricSource.entries.getOrElse(sp.getInt(K_LYRIC_SOURCE, LyricSource.LYRICON.ordinal)) { LyricSource.LYRICON }
+        )
 
         // 一次性迁移：旧版手动调出的偏移值（基于旧基准）会与新基准叠加，故重定基归 0，并把绝对项刷到新默认。
         if (sp.getInt(K_CFG_VERSION, 0) < CFG_VERSION) {
@@ -95,6 +109,20 @@ object ConfigStore {
             .apply()
     }
 
+    fun saveToolProjectionEnabled(context: Context, enabled: Boolean) {
+        ToolProjectionState.update(enabled)
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putBoolean(K_TOOL_PROJECTION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun saveLyricSource(context: Context, source: LyricSource) {
+        LyricSourceState.update(source)
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putInt(K_LYRIC_SOURCE, source.ordinal)
+            .apply()
+    }
+
     fun save(context: Context, cfg: RearConfig) {
         RearConfigState.update(cfg)
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().apply {
@@ -112,6 +140,8 @@ object ConfigStore {
             putBoolean(K_GRADIENT, cfg.gradientProgress)
             putBoolean(K_RELATIVE_PROGRESS, cfg.relativeProgress)
             putBoolean(K_RELATIVE_HIGHLIGHT, cfg.relativeHighlight)
+            putBoolean(K_SIMULATE_WORD, cfg.simulateWordTiming)
+            putInt(K_LYRIC_ANIMATION, cfg.lyricAnimation.ordinal)
             putInt(K_SAFE_LEFT, cfg.safeAreaLeft)
             putInt(K_SAFE_RIGHT, cfg.safeAreaRight)
             putInt(K_LYRIC_TEXT_SIZE, cfg.lyricTextSize)
@@ -119,6 +149,8 @@ object ConfigStore {
             putInt(K_LOCK_OFFSET, cfg.lockOffset)
             putInt(K_TIME_OFFSET, cfg.timeOffset)
             putInt(K_TIME_LINE_LEN, cfg.timeLineLength)
+            putInt(K_BATTERY_MODE, cfg.batteryMode.ordinal)
+            putBoolean(K_CHARGE_WAVE, cfg.chargeWave)
             apply()
         }
     }

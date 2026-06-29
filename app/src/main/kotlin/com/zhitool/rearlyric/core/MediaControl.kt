@@ -10,6 +10,7 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.SystemClock
 import com.zhitool.rearlyric.tools.notify.ZhiNotificationListener
 import kotlin.concurrent.thread
 
@@ -104,6 +105,56 @@ object MediaControl {
     fun previous(context: Context, pkg: String?) {
         val c = controllerFor(context, pkg)
         if (c != null) c.transportControls.skipToPrevious() else dispatchKey(KEY_PREVIOUS)
+    }
+
+    /** 当前播放进度 + 播放态（自系统会话直读，独立于词幕）。 */
+    data class Playback(val positionMs: Long, val playing: Boolean)
+
+    /**
+     * 从系统媒体会话直读「当前播放进度（外推到此刻）+ 播放态」——这样进度由我们自己掌握，
+     * 不依赖词幕持续上报；词幕断了/不提供进度时歌词仍能跟着实时跑。
+     * 返回 null = 拿不到会话（无通知使用权 / 无活跃会话 / state=NONE / 进度无效）。
+     */
+    fun readPlayback(context: Context, pkg: String?): Playback? {
+        val c = controllerFor(context, pkg) ?: return null
+        val ps = c.playbackState ?: return null
+        if (ps.state == PlaybackState.STATE_NONE || ps.position < 0L) return null
+        val playing = ps.state == PlaybackState.STATE_PLAYING
+        val updated = ps.lastPositionUpdateTime
+        val pos = if (playing && updated > 0L) {
+            // PlaybackState 设计即如此外推：当前进度 = 上次设值进度 + (现在 - 上次设值时刻) * 速率。
+            val speed = ps.playbackSpeed.takeIf { it != 0f } ?: 1f
+            ps.position + ((SystemClock.elapsedRealtime() - updated) * speed).toLong()
+        } else {
+            ps.position
+        }
+        return Playback(pos.coerceAtLeast(0L), playing)
+    }
+
+    /** 会话元数据：歌名/歌手/封面字节（SuperLyric 没给元数据时从系统会话补）。 */
+    data class Meta(val title: String?, val artist: String?, val coverBytes: ByteArray?)
+
+    fun readMetadata(context: Context, pkg: String?, withCover: Boolean = false): Meta? {
+        val c = controllerFor(context, pkg) ?: return null
+        val m = c.metadata ?: return null
+        val title = m.getText(MediaMetadata.METADATA_KEY_TITLE)?.toString()?.takeIf { it.isNotBlank() }
+        val artist = (m.getText(MediaMetadata.METADATA_KEY_ARTIST)?.toString()
+            ?: m.getText(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)?.toString())?.takeIf { it.isNotBlank() }
+        val bytes = if (withCover) {
+            val art = m.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: m.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                ?: m.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+            art?.let { bmp ->
+                runCatching {
+                    val s = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, s)
+                    s.toByteArray()
+                }.getOrNull()
+            }
+        } else {
+            null
+        }
+        return if (title == null && artist == null && bytes == null) null else Meta(title, artist, bytes)
     }
 
     /** 歌曲总时长（毫秒），从会话元数据取；取不到返回 0。 */

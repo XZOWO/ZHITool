@@ -31,6 +31,9 @@ class LiquidFillView(context: Context) : View(context), SensorEventListener {
         isDither = true
         color = 0xFF34C759.toInt()
     }
+    /** 液体竖向渐变两端（顶=液面较亮，底=较暗）。默认系统电池绿。可由 [setLiquidColors] 改成封面取色。 */
+    private var topColor = 0xFF34C759.toInt()
+    private var bottomColor = 0xFF2BA84C.toInt()
     private val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = 0x80FFFFFF.toInt()
@@ -58,6 +61,13 @@ class LiquidFillView(context: Context) : View(context), SensorEventListener {
             sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         }
+    }
+
+    /** 设置液体竖向渐变色（顶=液面较亮，底=较暗）。 */
+    fun setLiquidColors(top: Int, bottom: Int) {
+        topColor = top
+        bottomColor = bottom
+        invalidate()
     }
 
     /** 设置填充比例 0..1，启动/停止波浪动画。 */
@@ -112,6 +122,11 @@ class LiquidFillView(context: Context) : View(context), SensorEventListener {
         liquidPath.lineTo(width.toFloat(), height.toFloat())
         liquidPath.lineTo(0f, height.toFloat())
         liquidPath.close()
+        // 竖向渐变：液面(waveY)较亮 → 底部较暗，让液体更有体积感、不死板。
+        liquidPaint.shader = LinearGradient(
+            0f, waveY, 0f, height.toFloat(),
+            topColor, bottomColor, Shader.TileMode.CLAMP,
+        )
         canvas.drawPath(liquidPath, liquidPaint)
 
         if (lastShadowHeight != height) {

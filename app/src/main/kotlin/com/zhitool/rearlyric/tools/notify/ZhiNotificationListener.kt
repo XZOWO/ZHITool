@@ -14,6 +14,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import com.zhitool.rearlyric.lyric.ToolProjectionState
 import com.zhitool.rearlyric.tools.overlay.RearOverlaySupport
 import kotlin.concurrent.thread
 
@@ -42,6 +43,7 @@ class ZhiNotificationListener : NotificationListenerService(), SensorEventListen
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val cfg = NotifyConfigState.current
         if (!cfg.enabled) return
+        if (!ToolProjectionState.current) return // "停止所有投放"总开关关闭时不投通知
         val n = sbn.notification ?: return
         if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return // 常驻通知
         if (sbn.packageName == packageName) return

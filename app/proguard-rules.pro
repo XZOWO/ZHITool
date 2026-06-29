@@ -28,6 +28,10 @@
 -keep class io.github.proify.** { *; }
 -keepclassmembers class io.github.proify.** { *; }
 
+# SuperLyric：AIDL 接口 + Parcelable 数据类经 Binder 跨进程封送，整体保留（防 R8 改名破坏封送）
+-keep class com.hchen.superlyricapi.** { *; }
+-dontwarn com.hchen.superlyricapi.**
+
 # miuix / kyant backdrop
 -dontwarn top.yukonga.miuix.**
 -dontwarn com.kyant.**

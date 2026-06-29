@@ -7,6 +7,8 @@ package com.zhitool.rearlyric.tools.charge
 import android.content.Context
 import android.content.Intent
 import android.os.BatteryManager
+import com.zhitool.rearlyric.lyric.LyricBus
+import com.zhitool.rearlyric.lyric.ToolProjectionState
 import com.zhitool.rearlyric.tools.ToolsConfigState
 import com.zhitool.rearlyric.tools.overlay.RearOverlaySupport
 import kotlin.concurrent.thread
@@ -19,7 +21,10 @@ object ChargeOverlay {
     @Volatile private var lastProjectAt = 0L
 
     fun project(context: Context) {
+        if (!ToolProjectionState.current) return
         if (!ToolsConfigState.current.chargeAnimation) return
+        // 正在投放歌词（播放音乐）时：充电动画改在歌词背后画液体（由 RearLyricScreen 渲染），不另起充电页。
+        if (LyricBus.projected.value) return
         val now = System.currentTimeMillis()
         if (now - lastProjectAt < COOLDOWN_MS) return
         lastProjectAt = now

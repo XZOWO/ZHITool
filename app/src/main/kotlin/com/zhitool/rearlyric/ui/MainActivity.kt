@@ -47,7 +47,6 @@ import com.zhitool.rearlyric.ZhiApplication
 import com.zhitool.rearlyric.core.RootShell
 import com.zhitool.rearlyric.lyric.LyricBus
 import com.zhitool.rearlyric.lyric.LyricService
-import com.zhitool.rearlyric.rear.RearProjector
 import com.zhitool.rearlyric.ui.glass.FloatingBottomBar
 import com.zhitool.rearlyric.ui.glass.FloatingBottomBarItem
 import com.zhitool.rearlyric.ui.icons.LyricNoteIcon
@@ -109,7 +108,6 @@ private fun ZhiApp(rootGranted: Boolean) {
         )
     }
     val song by LyricBus.songFlow.collectAsState()
-    val projected by LyricBus.projected.collectAsState()
     val lsposedActive by ZhiApplication.lsposedActive.collectAsStateWithLifecycle()
 
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -140,15 +138,7 @@ private fun ZhiApp(rootGranted: Boolean) {
                         0 -> HomeScreen(
                             rootGranted = rootGranted,
                             lyricConnected = song != null,
-                            projected = projected,
                             lsposedActive = lsposedActive,
-                            onToggleProject = {
-                                if (projected) {
-                                    RearProjector.hide()
-                                } else {
-                                    thread(name = "zhi-project") { RearProjector.show() }
-                                }
-                            },
                             contentPadding = contentPadding,
                         )
                         1 -> ToolsScreen(contentPadding)

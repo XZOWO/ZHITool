@@ -31,6 +31,7 @@ import android.view.View
 import androidx.compose.ui.graphics.toArgb
 import com.zhitool.rearlyric.lyric.CoverPosition
 import com.zhitool.rearlyric.lyric.CoverShape
+import com.zhitool.rearlyric.lyric.LyricAnimation
 import com.zhitool.rearlyric.lyric.LyricColors
 import com.zhitool.rearlyric.lyric.LyricRenderMetrics
 import com.zhitool.rearlyric.lyric.RearConfig
@@ -63,6 +64,13 @@ private const val SONG_SWITCH_MS = 500f
 private const val SONG_SWITCH_SHIFT_FRAC = 0.45f
 /** 切歌后这么久内强制按"首句前"渲染（新歌默认从头、显示大封面），之后再采用新歌真实进度。 */
 private const val SONG_SWITCH_HOLD_MS = 300L
+/**
+ * 换歌封面过渡（独立于整页底板上滑）：旧封面飞出/新封面飞入时长、大封面飞出缩放系数、
+ * 以及等新封面加载的最长等待（超时就用当前封面飞入，避免一直空着）。
+ */
+private const val COVER_FLY_MS = 540f
+private const val COVER_EXIT_SCALE = 0.8f
+private const val COVER_ENTER_MAX_WAIT_MS = 3000L
 /** 中心句上下各绘制 3 句可见 + 1 句备绘，滚动时边缘不再看着加载。 */
 private const val DRAW_RADIUS = 4
 /** 渐隐范围放宽到 3.6 个行位：边缘句透明度约为收紧前的 80%。 */
@@ -147,6 +155,10 @@ private const val NAME_SHOW_MS = 3000L
 private const val NAME_TIME_SWITCH_MS = 280f
 private const val MARQUEE_SPEED_DP = 36f
 private const val MARQUEE_GAP_DP = 44f
+/** 封面单击/双击：双击进控制面板的判定窗口；单击弹"双击打开控制页"提示的总显示时长与提示文案。 */
+private const val COVER_DOUBLE_TAP_MS = 280L
+private const val COVER_HINT_MS = 2600f
+private const val COVER_HINT_TEXT = "双击打开控制页"
 /** 旋转封面每圈用时（秒），与单句模式一致。 */
 private const val COVER_ROTATION_SECONDS = 16f
 /** 渐变高亮：前沿羽化宽度（相对字号）。 */
@@ -156,6 +168,21 @@ private val HIGHLIGHT_MASK_COLORS = intArrayOf(-0x1, 0x00FFFFFF)
 
 /** Apple Music：歌词自带逐句居左/居右（对唱），直接采用。 */
 private const val APPLE_MUSIC_PKG = "com.apple.android.music"
+
+// ---- SuperLyric 单句模式 ----
+/** 当前句字号上限按「一行 7 汉字」占满内容宽算（无下限，再按行数/高度/超长词往下缩）。 */
+private const val SL_CHARS_PER_LINE = 7
+private const val SL_MAX_ROWS = 3
+/** 「随机升起」：单 token 升起时长（ms，偏快）。 */
+private const val SL_RISE_DUR_MS = 280f
+/** 「随机升起」：各 token 起始延迟的随机上限（ms，制造随机时序）。 */
+private const val SL_RISE_STAGGER_MS = 420L
+/** 「随机升起」：起始下移量（相对行高），从下方升到位。 */
+private const val SL_RISE_DIST_FRAC = 1.0f
+/** 行高系数（基于字形盒高 descent-ascent，去掉字体多余行距，三行更紧凑不溢出）。 */
+private const val SL_ROW_SPACING = 1.05f
+/** 下半区竖向可用比例（留上下边距，避免末行贴边/被截断）。 */
+private const val SL_BOTTOM_FILL = 0.9f
 
 /**
  * 全量歌词模式（Apple Music 式）：固定字号、逐词排版，对齐跟随歌词数据
@@ -206,6 +233,12 @@ internal class FullLyricView @JvmOverloads constructor(
         isLinearText = true
         setShadowLayer(dp(5f), 0f, dp(1.5f), Color.argb(110, 0, 0, 0))
     }
+    /** SuperLyric 单句模式：当前句独立字号（按 7 汉字+1 空格/行算，不随歌词页字号）。 */
+    private val slPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        isSubpixelText = true
+        isLinearText = true
+    }
     /** 渐变高亮前沿羽化：在 saveLayer 内用 DST_IN 横向 alpha 渐变蒙版裁出软边。 */
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val dstInXfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -248,8 +281,11 @@ internal class FullLyricView @JvmOverloads constructor(
     private var dockNameFrom = 1f
     private var dockNameTarget = 1f
     private var dockNameAnimAt = 0L
-    /** 封面命中区（视图坐标）：点击封面 → 放大成控制面板（onCoverTap）。 */
+    /** 封面命中区（视图坐标）：双击封面 → 放大成控制面板（onCoverTap）；单击 → 弹"双击打开控制页"提示。 */
     private val coverHitRect = RectF()
+    /** 封面单击/双击判定：[coverTapAt]=上次单击墙钟（判双击）；[coverHintAt]=提示起始墙钟（0=未显示）。 */
+    private var coverTapAt = 0L
+    private var coverHintAt = 0L
     /** 角落封面当前是否已停靠 + 文字带命中区（封面左侧文字区，点击切换歌名/时间）。 */
     private var coverDocked = false
     private val textHitRect = RectF()
@@ -288,6 +324,8 @@ internal class FullLyricView @JvmOverloads constructor(
     private var lockReported = false
     private val relockRunnable = Runnable { doRelock() }
     private val unlockRunnable = Runnable { doUnlock() }
+    /** 封面单击延时确认（在双击窗口内没有第二击才弹提示）。 */
+    private val coverSingleTapRunnable = Runnable { triggerCoverHint() }
 
     // ---- 拖动调整进度（scrub，自由滚动 + 惯性）----
     /** 手动浏览中：渲染用 [scrubScroll] 取代直播滚动（手指抓取/惯性/松手停留期间都为 true）。 */
@@ -323,6 +361,31 @@ internal class FullLyricView @JvmOverloads constructor(
         panelProgress = p.coerceIn(0f, 1f)
         invalidate()
     }
+
+    /**
+     * SuperLyric 单句模式：封面**常驻大封面**（不停靠角落）+ 封面下方只排版**当前一句**歌词
+     * （类似首句前样式，但下方是当前句而非圆点）。由 RearLyricActivity 据数据源设置。
+     */
+    private var singleLineMode = false
+
+    fun setSingleLineMode(b: Boolean) {
+        if (singleLineMode == b) return
+        singleLineMode = b
+        slLineKey = null
+        invalidate()
+    }
+
+    // ---- SuperLyric 单句模式：当前句独立排版（下半区，独立字号）+ 随机升起进场 ----
+    /** 当前句排版后的 token（独立字号、≤3 行、下半区居中）。 */
+    private var slTokens: List<Token> = emptyList()
+    /** 排版缓存键（文本+宽高+配色等变化才重排，重排即重启升起动画）。 */
+    private var slLineKey: String? = null
+    private var slFontSize = 0f
+    private var slRowHeight = 0f
+    /** 当前句升起动画起点（句变化时置 now）。 */
+    private var slAnimAt = 0L
+    /** 上次 bind 的墙钟时间（逐字扫过逐帧外推进度用）。 */
+    private var bindWallAt = 0L
 
     /** 24 小时时间文字按分钟缓存。 */
     private var clockText = ""
@@ -376,6 +439,23 @@ internal class FullLyricView @JvmOverloads constructor(
     private var songSwitchHoldUntil = 0L
     private val switchPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
+    /** 换歌封面过渡（独立于整页底板）：旧封面飞出 + 新封面（加载后）飞入，封面图片与封面槽位解耦。 */
+    private var coverExitBitmap: Bitmap? = null
+    private var coverExitAt = 0L
+    private var coverExitFromCx = 0f
+    private var coverExitFromCy = 0f
+    private var coverExitFromSize = 0f
+    private var coverExitDocked = false
+    private var coverEnterAt = 0L          // 新封面飞入起点；0=未飞入
+    private var coverEnterPending = false  // 已切歌、等新封面加载后飞入
+    /** 最近一帧封面槽位几何（飞入目标 / 飞出起点用）。 */
+    private var lastCoverCx = 0f
+    private var lastCoverCy = 0f
+    private var lastCoverSize = 0f
+    private var lastCoverDocked = false
+    /** 正在为整页底板快照渲染：此时跳过所有封面绘制，封面交给飞入/飞出层。 */
+    private var drawingSnapshot = false
+
     fun bind(
         song: Song?,
         positionMs: Long,
@@ -386,7 +466,12 @@ internal class FullLyricView @JvmOverloads constructor(
         playing: Boolean,
     ) {
         val songChanged = this.song !== song
-        if (songChanged) {
+        // 区分「真正换歌」与「同一首歌随后补下发歌词」：provider 常先下发无歌词的元数据、
+        // 再下发带歌词的同一首（两个不同对象）。若都按对象引用当作换歌，会在元数据到达时
+        // 上滑一次、歌词到达时再顶一次（出现两次切换动画）。仅「真正换歌」才做整页上滑过渡
+        // 与状态重置；同一首补歌词只重建排版让歌词就地显示（snap 就位，不再触发上滑）。
+        val isNewSong = !isSameLogicalSong(this.song, song)
+        if (isNewSong) {
             // 换歌：退出拖动浏览、回锁、撤销本地 seek 覆盖（新歌重新从锁定态开始）。
             scrubbing = false
             scrubGrabbed = false
@@ -401,11 +486,26 @@ internal class FullLyricView @JvmOverloads constructor(
             onScrubChange?.invoke(false, 0L)
         }
         // 切歌：接下来 SONG_SWITCH_HOLD_MS 内强制新歌按"首句前"渲染（默认从头、显示大封面）。
-        if (songChanged && this.song != null) {
+        if (isNewSong && this.song != null) {
             songSwitchHoldUntil = SystemClock.elapsedRealtime() + SONG_SWITCH_HOLD_MS
         }
+        // 换歌封面过渡：把当前(旧)封面拎出来飞出，新封面等加载后再飞入；封面图片与封面槽位解耦。
+        // 必须在快照之前置位，让底板快照（drawingSnapshot）跳过封面，避免封面被烤进底板与飞出层重影。
+        if (isNewSong && this.song != null && config.cover != CoverPosition.NONE && width > 0 && height > 0) {
+            val cur = this.coverBitmap
+            if (cur != null && lastCoverSize > 0f) {
+                coverExitBitmap = cur
+                coverExitAt = SystemClock.elapsedRealtime()
+                coverExitFromCx = lastCoverCx
+                coverExitFromCy = lastCoverCy
+                coverExitFromSize = lastCoverSize
+                coverExitDocked = lastCoverDocked
+            }
+            coverEnterPending = true
+            coverEnterAt = 0L
+        }
         // 换歌：先快照当前画面，onDraw 让它上滑淡出、新歌内容从下方顶上来。
-        if (songChanged && this.song != null && song != null && width > 0 && height > 0) {
+        if (isNewSong && this.song != null && song != null && width > 0 && height > 0) {
             captureSongSwitchSnapshot()
         }
         // 封面对象变化（换歌/重解码）时旋转角归零，与单句模式一致。
@@ -413,6 +513,11 @@ internal class FullLyricView @JvmOverloads constructor(
             this.coverBitmap = coverBitmap
             coverRotation = 0f
             lastCoverFrameAt = 0L
+            // 新封面加载到位（切歌等待期间）：开始飞入。
+            if (coverEnterPending && coverBitmap != null) {
+                coverEnterAt = SystemClock.elapsedRealtime()
+                coverEnterPending = false
+            }
         }
         // 播放/暂停切换：角落小封面 1↔1.1 平滑缩放。
         if (playing != this.playing) {
@@ -439,6 +544,7 @@ internal class FullLyricView @JvmOverloads constructor(
         } else {
             holdPos
         }
+        bindWallAt = now0
         this.config = config
         this.colors = colors
         this.playerPackage = playerPackage
@@ -454,6 +560,7 @@ internal class FullLyricView @JvmOverloads constructor(
             showTranslation = config.showTranslation,
             showRoma = config.showRoma,
             relativeHighlight = config.relativeHighlight,
+            simulateWordTiming = config.simulateWordTiming,
             lyricTextSize = config.lyricTextSize,
             playerPackage = playerPackage,
         )
@@ -467,10 +574,28 @@ internal class FullLyricView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * 是否是「另一首歌」（用于区分真正换歌与同一首歌补下发歌词）。
+     * 同一首判定：id 都有且相等，或 歌名+歌手 都有且相等（任一成立即同一首）。
+     * 这样既能容忍 provider 仅在某次下发里带 id、也能容忍补歌词时 id 变化——只要
+     * 歌名/歌手稳定就不会被误判成换歌而触发第二次整页上滑动画。
+     */
+    private fun isSameLogicalSong(a: Song?, b: Song?): Boolean {
+        if (a === b) return true
+        if (a == null || b == null) return false
+        val aId = a.id?.takeIf { it.isNotBlank() }
+        val bId = b.id?.takeIf { it.isNotBlank() }
+        if (aId != null && bId != null && aId == bId) return true
+        val aName = a.name?.takeIf { it.isNotBlank() }
+        val bName = b.name?.takeIf { it.isNotBlank() }
+        return aName != null && bName != null && aName == bName && a.artist == b.artist
+    }
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         handler.removeCallbacks(unlockRunnable)
         handler.removeCallbacks(relockRunnable)
+        handler.removeCallbacks(coverSingleTapRunnable)
         recycleVelocity()
     }
 
@@ -489,7 +614,10 @@ internal class FullLyricView @JvmOverloads constructor(
         songSwitchBitmap?.recycle()
         songSwitchBitmap = null
         val bmp = runCatching { Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) }.getOrNull() ?: return
+        // 底板快照不含封面（封面交给飞出/飞入层），避免封面被烤进底板再叠一份飞出造成重影。
+        drawingSnapshot = true
         draw(Canvas(bmp))
+        drawingSnapshot = false
         songSwitchBitmap = bmp
         songSwitchStartedAt = SystemClock.elapsedRealtime()
     }
@@ -509,6 +637,8 @@ internal class FullLyricView @JvmOverloads constructor(
             canvas.translate(0f, (1f - p) * shift)
             renderLyrics(canvas, now)
             canvas.restore()
+            // 封面飞出/飞入独立于底板上滑（绝对坐标，不跟随底板位移）。
+            drawCoverTransition(canvas, now)
             postInvalidateOnAnimation()
             return
         }
@@ -517,12 +647,18 @@ internal class FullLyricView @JvmOverloads constructor(
             songSwitchBitmap = null
         }
         renderLyrics(canvas, now)
+        drawCoverTransition(canvas, now)
     }
 
     private fun renderLyrics(canvas: Canvas, now: Long) {
         // 每帧重置命中区，由封面绘制按当前状态重新设置（无封面/无歌词时为空，不响应点击）。
         coverHitRect.setEmpty()
         textHitRect.setEmpty()
+        if (singleLineMode) {
+            // SuperLyric：上半区大封面 + 下半区当前句（独立字号、≤3 行、随机升起）。
+            renderSuperLyric(canvas, now)
+            return
+        }
         if (models.isEmpty()) {
             // 无歌词：全量模式退化为"封面 + 歌名 + 歌手"居中展示（同歌曲信息模式）。
             drawNoLyricCard(canvas, now)
@@ -552,8 +688,14 @@ internal class FullLyricView @JvmOverloads constructor(
         }
         lastScroll = scroll
 
-        // 歌词上下不设安全区限制：以整屏（视图全高）为中心，允许滑出屏幕（进出场动效本就来自屏幕外）。
-        val viewCenter = height / 2f
+        // 当前句锚点：词幕源居中（height/2）；SuperLyric 单句模式把当前句画在大封面下方。
+        val viewCenter = if (singleLineMode) {
+            val contentTop = paddingTop.toFloat()
+            val contentHeight = (height - paddingTop - paddingBottom).toFloat()
+            contentTop + contentHeight * INTRO_TOP_FRAC + introCoverSizePx() + textSizePx * 1.6f
+        } else {
+            height / 2f
+        }
         val fadeRange = FADE_SLOTS * (textSizePx * 1.2f + lineGapPx)
 
         canvas.save()
@@ -621,11 +763,274 @@ internal class FullLyricView @JvmOverloads constructor(
                 // 歌名↔时间交叉过渡期间持续重绘。
                 (dockNameAnimAt != 0L && now - dockNameAnimAt < NAME_TIME_SWITCH_MS.toLong()) ||
                 // 歌名显示中（跑马灯/自动切时间计时）持续重绘。
-                (coverDocked && dockNameTarget >= 0.5f)
+                (coverDocked && dockNameTarget >= 0.5f) ||
+                // 单击封面的"双击打开控制页"提示淡入淡出期间持续重绘。
+                (coverHintAt != 0L && now - coverHintAt < COVER_HINT_MS.toLong())
         )
-        if (scrollAnimating || revealAnimating || zoomAnimating || overlapIndex >= 0 || coverAnimating || lockBusy) {
+        if (scrollAnimating || revealAnimating || zoomAnimating || overlapIndex >= 0 || coverAnimating || lockBusy ||
+            coverTransitionActive(now)
+        ) {
             postInvalidateOnAnimation()
         }
+    }
+
+    // ---- SuperLyric 单句渲染 ----
+
+    /**
+     * SuperLyric 单句模式渲染：上半区沿用「大封面 + 歌名/歌手」（[drawCoverWidget]，封面常驻不停靠），
+     * 下半区把**当前一句**以独立字号（一行 7 汉字、≤3 行、下半区垂直居中）绘制；句变化时逐字/逐词
+     * 「随机升起」进场；右上角画时钟（仅时间，不点击切歌名）。
+     */
+    private fun renderSuperLyric(canvas: Canvas, now: Long) {
+        // SL 模式不走滚动；归零 lastScroll 让封面提示等依赖项有确定基准。
+        lastScroll = 0f
+        val line = lines.firstOrNull()
+        val text = line?.text?.takeIf { it.isNotBlank() }
+        val key = if (text == null) {
+            null
+        } else {
+            "$text|${width - paddingLeft - paddingRight}|$height|${config.textColorMode}|" +
+                "${config.relativeHighlight}|${config.lyricAnimation}|${config.fontWeight}|${config.italic}"
+        }
+        if (key != slLineKey) {
+            slLineKey = key
+            if (line != null && text != null) {
+                buildSuperLyricLayout(line)
+                slAnimAt = now
+            } else {
+                slTokens = emptyList()
+            }
+        }
+
+        // 下半区当前句（逐字扫过 + 随机升起）。控制面板展开时淡到背景。
+        val lyricFade = 1f - 0.62f * panelProgress
+        if (lyricFade > 0.01f && slTokens.isNotEmpty()) {
+            drawSuperLyricTokens(canvas, now, lyricFade)
+        }
+
+        // 上半区：大封面 + 歌名/歌手（无封面则不画引导卡，仅留歌词）。
+        val coverWidgetEnabled = coverBitmap != null && config.cover != CoverPosition.NONE
+        if (coverWidgetEnabled) {
+            drawCoverWidget(canvas, now)
+        }
+
+        // 右上角时钟（仅时间，位置与词幕模式停靠时的时间完全一致）。
+        drawSingleLineClock(canvas, now)
+
+        reportLockVisual(now)
+
+        val animOn = config.lyricAnimation == LyricAnimation.RANDOM_RISE
+        val riseActive = animOn && slAnimAt != 0L &&
+            now - slAnimAt < SL_RISE_STAGGER_MS + SL_RISE_DUR_MS.toLong() + 60L
+        val lockBusy = pressArmAt != 0L || (lockAnimAt != 0L && now - lockAnimAt < LOCK_ANIM_MS.toLong())
+        val coverAnimating = coverWidgetEnabled && (
+            (config.coverShape == CoverShape.CIRCLE_ROTATE && playing) ||
+                (coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()) ||
+                (coverHintAt != 0L && now - coverHintAt < COVER_HINT_MS.toLong()) ||
+                coverTransitionActive(now)
+            )
+        // 播放中：逐字扫过靠逐帧外推推进，需要持续重绘。
+        if (riseActive || playing || lockBusy || coverAnimating) {
+            postInvalidateOnAnimation()
+        }
+    }
+
+    /** 当前句排版：复用逐词时间，自算独立字号 + ≤3 行换行 + 下半区垂直居中 + 升起随机时序。 */
+    private fun buildSuperLyricLayout(line: RichLyricLine) {
+        val contentLeft = paddingLeft.toFloat()
+        val contentWidth = (width - paddingLeft - paddingRight).toFloat().coerceAtLeast(1f)
+        val contentTop = paddingTop.toFloat()
+        val contentHeight = (height - paddingTop - paddingBottom).toFloat().coerceAtLeast(1f)
+        slPaint.typeface = buildTypeface(config)
+
+        // 复用逐词排版只为拿「文本 + 逐字 begin/end」；此处宽度给超大值避免在 buildLineModel 内换行。
+        slPaint.textSize = 100f
+        val baseTokens = buildLineModel(
+            textPaint = slPaint,
+            lineText = line.text.orEmpty(),
+            lineBegin = line.begin,
+            lineEnd = line.end,
+            words = line.words,
+            contentWidth = contentWidth * 8f,
+            // SuperLyric「随机升起」要求中文逐字、英文逐词，故强制按单字拆 CJK（不随逐字高亮开关）。
+            splitCjkWords = true,
+            align = LineAlign.LEFT,
+            latinExtraPx = 0f,
+        ).tokens
+        if (baseTokens.isEmpty()) {
+            slTokens = emptyList()
+            return
+        }
+
+        // 下半区与竖向可用高度（留上下边距，避免末行贴边/被截断）。
+        val bottomTop = contentTop + contentHeight * 0.5f
+        val bottomHeight = contentHeight * 0.5f
+        val availH = bottomHeight * SL_BOTTOM_FILL
+
+        // 字号上限：一行放 7 个汉字占满内容宽（字少时也按此上限，避免显得偏小）。
+        slPaint.textSize = 100f
+        val unit = (slPaint.measureText("汉") * SL_CHARS_PER_LINE).coerceAtLeast(1f)
+        var size = 100f * contentWidth / unit
+
+        // 同时满足：① ≤3 行；② 总高 ≤ 下半区可用高度（否则第三行被竖向截断）；
+        // ③ 最宽单 token（如超长英文单词，不拆词换行）≤ 内容宽（否则该词横向超出被截断）。
+        // 任一不满足就继续缩字号（无下限）。
+        var rows = wrapSuperLyricRows(baseTokens, contentWidth, size)
+        var rowHeight = slRowHeightAt(size)
+        while ((rows.size > SL_MAX_ROWS || rows.size * rowHeight > availH ||
+                slWidestTokenWidth(baseTokens, size) > contentWidth) && size > 4f
+        ) {
+            size *= 0.94f
+            rows = wrapSuperLyricRows(baseTokens, contentWidth, size)
+            rowHeight = slRowHeightAt(size)
+        }
+        slFontSize = size
+        slPaint.textSize = size
+        slRowHeight = rowHeight
+        val ascent = -slPaint.ascent()
+
+        // 下半区垂直居中（1/2/3 行都在下半区居中）。
+        val totalH = rows.size * rowHeight
+        val blockTop = bottomTop + ((bottomHeight - totalH) / 2f).coerceAtLeast(0f)
+
+        rows.forEachIndexed { r, rowToks ->
+            slPaint.textSize = size
+            val rowW = rowToks.sumOf { slPaint.measureText(it.text).toDouble() }.toFloat()
+            var x = contentLeft + ((contentWidth - rowW) / 2f).coerceAtLeast(0f)
+            val top = blockTop + r * rowHeight
+            for (tok in rowToks) {
+                tok.size = size
+                tok.width = slPaint.measureText(tok.text)
+                tok.x = x
+                tok.rowTop = top
+                tok.rowBottom = top + rowHeight
+                tok.baseline = top + ascent
+                tok.riseDelay = (Math.random() * SL_RISE_STAGGER_MS).toLong()
+                x += tok.width
+            }
+        }
+        slTokens = rows.flatten()
+    }
+
+    /** 给定字号下最宽单 token 的宽度（用于保证超长单词单行也不被横向截断）。 */
+    private fun slWidestTokenWidth(tokens: List<Token>, size: Float): Float {
+        slPaint.textSize = size
+        var w = 0f
+        for (t in tokens) w = max(w, slPaint.measureText(t.text))
+        return w
+    }
+
+    /** 给定字号下的单行行高：按字形盒高（descent-ascent）+ 少量呼吸间距，去掉字体多余行距。 */
+    private fun slRowHeightAt(size: Float): Float {
+        slPaint.textSize = size
+        val fm = slPaint.fontMetrics
+        return (fm.descent - fm.ascent) * SL_ROW_SPACING
+    }
+
+    /** 贪心换行（按当前 [size] 测宽），单 token 超宽则独占一行。 */
+    private fun wrapSuperLyricRows(tokens: List<Token>, width: Float, size: Float): List<List<Token>> {
+        slPaint.textSize = size
+        val rows = ArrayList<MutableList<Token>>()
+        var row = ArrayList<Token>()
+        var w = 0f
+        for (t in tokens) {
+            val tw = slPaint.measureText(t.text)
+            if (row.isNotEmpty() && w + tw > width) {
+                rows += row
+                row = ArrayList()
+                w = 0f
+            }
+            row += t
+            w += tw
+        }
+        if (row.isNotEmpty()) rows += row
+        return rows
+    }
+
+    /** 下半区当前句绘制：逐字扫过（沿用渐变/clip 进度逻辑）+ 每 token 随机升起进场。 */
+    private fun drawSuperLyricTokens(canvas: Canvas, now: Long, fade: Float) {
+        // SuperLyric 进度来自系统会话（~500ms 一拍），逐帧按经过时间外推让逐字扫过平滑。
+        val effPos = if (playing) positionMs + (now - bindWallAt).coerceAtLeast(0L) else positionMs
+        val animOn = config.lyricAnimation == LyricAnimation.RANDOM_RISE
+        val baseA = 255f * fade
+        val hiA = 255f * fade
+        val riseDist = slRowHeight * SL_RISE_DIST_FRAC
+        val baseSize = slPaint.textSize
+        for (tok in slTokens) {
+            // 进场升起：每 token 随机延迟、easeOutCubic（非线性）从下方升起 + 渐显。
+            val ease = if (!animOn) {
+                1f
+            } else {
+                val t = ((now - slAnimAt - tok.riseDelay).toFloat() / SL_RISE_DUR_MS).coerceIn(0f, 1f)
+                easeOutCubic(t)
+            }
+            val dy = (1f - ease) * riseDist
+            val a = ease
+            slPaint.textSize = tok.size
+            val sung = effPos >= tok.end || (!config.relativeProgress && effPos > tok.begin)
+            when {
+                sung -> {
+                    applyHighlight(slPaint, hiA * a)
+                    canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
+                }
+                effPos <= tok.begin -> {
+                    slPaint.shader = null
+                    slPaint.color = Color.WHITE
+                    slPaint.alpha = (baseA * a).roundToInt().coerceIn(0, 255)
+                    canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
+                }
+                else -> {
+                    slPaint.shader = null
+                    slPaint.color = Color.WHITE
+                    slPaint.alpha = (baseA * a).roundToInt().coerceIn(0, 255)
+                    canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
+                    val dur = (tok.end - tok.begin).coerceAtLeast(1L)
+                    val f = ((effPos - tok.begin).toFloat() / dur).coerceIn(0f, 1f)
+                    val front = tok.x + tok.width * f
+                    if (config.gradientProgress) {
+                        val soft = (tok.size * GRADIENT_SOFT_EM).coerceAtMost(tok.width)
+                        canvas.saveLayer(tok.x, tok.rowTop + dy, tok.x + tok.width, tok.rowBottom + dy, null)
+                        applyHighlight(slPaint, hiA * a)
+                        canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
+                        maskPaint.shader = LinearGradient(
+                            front - soft, 0f, front, 0f,
+                            HIGHLIGHT_MASK_COLORS, null, Shader.TileMode.CLAMP,
+                        )
+                        maskPaint.xfermode = dstInXfermode
+                        canvas.drawRect(tok.x, tok.rowTop + dy, tok.x + tok.width, tok.rowBottom + dy, maskPaint)
+                        maskPaint.xfermode = null
+                        maskPaint.shader = null
+                        canvas.restore()
+                    } else {
+                        canvas.save()
+                        canvas.clipRect(tok.x, tok.rowTop + dy, front, tok.rowBottom + dy)
+                        applyHighlight(slPaint, hiA * a)
+                        canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
+                        canvas.restore()
+                    }
+                }
+            }
+        }
+        slPaint.shader = null
+        slPaint.textSize = baseSize
+    }
+
+    /**
+     * 顶部时钟（SuperLyric 单句模式，仅时间）：垂直沿用词幕停靠时间的高度（停靠封面中心 Y），
+     * 水平**居左**贴内容左缘（不再像词幕那样靠右——SL 无角落封面，靠右会留空且显得偏右）。
+     */
+    private fun drawSingleLineClock(canvas: Canvas, now: Long) {
+        val margin = dp(DOCK_MARGIN_DP)
+        val dockCover = dockCoverSizePx() * currentCoverScale(now)
+        val centerY = margin + dockCover / 2f
+        clockPaint.shader = null
+        clockPaint.color = Color.WHITE
+        clockPaint.textSize = dockCoverSizePx() * CLOCK_TEXT_FRAC
+        clockPaint.alpha = 235
+        val fm = clockPaint.fontMetrics
+        val baseline = centerY - (fm.ascent + fm.descent) / 2f
+        val text = currentClockText()
+        canvas.drawText(text, paddingLeft.toFloat(), baseline, clockPaint)
     }
 
     // ---- 排版 ----
@@ -702,6 +1107,8 @@ internal class FullLyricView @JvmOverloads constructor(
         dockNameTarget = 1f
         dockNameAnimAt = 0L
         coverDocked = false
+        coverTapAt = 0L
+        coverHintAt = 0L
     }
 
     /** 引导卡歌名单次排版（无省略、不限行数，用于自适应缩字号判断真实行数）。 */
@@ -828,13 +1235,22 @@ internal class FullLyricView @JvmOverloads constructor(
         textPaint.textSize = cjkSize
         val tokens = rows.flatten()
         if (!timed) {
-            val total = tokens.sumOf { it.width.toDouble() }.toFloat().coerceAtLeast(1f)
-            val dur = (lineEnd - lineBegin).coerceAtLeast(1L)
-            var cum = 0f
-            for (tok in tokens) {
-                tok.begin = lineBegin + (dur * (cum / total)).toLong()
-                cum += tok.width
-                tok.end = lineBegin + (dur * (cum / total)).toLong()
+            if (config.simulateWordTiming) {
+                // 模拟逐字：按字宽把整句时长摊给各 token，假装逐字扫过。
+                val total = tokens.sumOf { it.width.toDouble() }.toFloat().coerceAtLeast(1f)
+                val dur = (lineEnd - lineBegin).coerceAtLeast(1L)
+                var cum = 0f
+                for (tok in tokens) {
+                    tok.begin = lineBegin + (dur * (cum / total)).toLong()
+                    cum += tok.width
+                    tok.end = lineBegin + (dur * (cum / total)).toLong()
+                }
+            } else {
+                // 关闭模拟逐字：整句到点一起点亮（begin=end=lineBegin），整句整句切、不假装逐字。
+                for (tok in tokens) {
+                    tok.begin = lineBegin
+                    tok.end = lineBegin
+                }
             }
         }
         return LineModel(tokens, rows.size * rowHeight, rows.size)
@@ -970,6 +1386,20 @@ internal class FullLyricView @JvmOverloads constructor(
 
     private fun updateScroll(snap: Boolean) {
         if (lines.isEmpty()) return
+        // SuperLyric 单句模式：只有一句，恒为当前句（画在大封面下方，不滚动、不停靠、无抢唱/副句）。
+        if (singleLineMode) {
+            overlapIndex = -1
+            if (currentIndex != 0) {
+                prevCurrentIndex = currentIndex
+                zoomStartedAt = SystemClock.elapsedRealtime()
+                currentIndex = 0
+                scrollAnimating = false
+                lastScroll = Float.NaN
+                revealIndex = -1
+                revealArmed = false
+            }
+            return
+        }
         var idx = -1
         for (i in lines.indices) {
             if (lines[i].begin <= positionMs) idx = i else break
@@ -1480,8 +1910,9 @@ internal class FullLyricView @JvmOverloads constructor(
         val artistW = introArtistLayout?.let { layoutWidth(it) } ?: 0f
         val textW = max(nameW, artistW)
         // 无歌词时封面居中；展开面板时上移到「首句前大封面」高度（与有歌词一致），给下方按键让位。
+        // SuperLyric 单句模式：封面恒定在大封面（顶部）位置，避免"无句→有句"时封面从居中跳到顶部。
         val introCenterY = contentTop + contentHeight * INTRO_TOP_FRAC + introCoverSizePx() / 2f
-        val centerY = lerp(contentTop + contentHeight / 2f, introCenterY, panelProgress)
+        val centerY = if (singleLineMode) introCenterY else lerp(contentTop + contentHeight / 2f, introCenterY, panelProgress)
 
         val bmp = coverBitmap
         if (bmp != null && config.cover != CoverPosition.NONE) {
@@ -1501,10 +1932,18 @@ internal class FullLyricView @JvmOverloads constructor(
                 coverCx + cover / 2f + hitPad,
                 centerY + cover / 2f + hitPad,
             )
-            drawCoverBitmap(canvas, bmp, coverCx, centerY, cover, rotationDeg)
+            // 记录封面槽位几何（飞出起点 / 飞入目标）：无歌词卡封面居中、非停靠。
+            lastCoverCx = coverCx
+            lastCoverCy = centerY
+            lastCoverSize = cover
+            lastCoverDocked = false
+            // 换歌封面过渡期间，居中封面也交给飞入/飞出层（底板快照亦不画），避免与切换动画重影。
+            if (!drawingSnapshot && !coverTransitionActive(now)) {
+                drawCoverBitmap(canvas, bmp, coverCx, centerY, cover, rotationDeg)
+            }
             drawIntroText(canvas, textLeft, centerY, 1f)
             val scaleAnimating = coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()
-            if ((config.coverShape == CoverShape.CIRCLE_ROTATE && playing) || scaleAnimating) {
+            if ((config.coverShape == CoverShape.CIRCLE_ROTATE && playing) || scaleAnimating || coverTransitionActive(now)) {
                 postInvalidateOnAnimation()
             }
         } else {
@@ -1580,7 +2019,19 @@ internal class FullLyricView @JvmOverloads constructor(
             )
         }
 
-        drawCoverBitmap(canvas, bmp, coverCx, coverCy, coverSize, rotationDeg)
+        // 记录封面槽位几何（飞出起点 / 飞入目标用）。
+        lastCoverCx = coverCx
+        lastCoverCy = coverCy
+        lastCoverSize = coverSize
+        lastCoverDocked = coverDocked
+
+        // 换歌封面过渡期间，槽位上的封面图片交给飞入/飞出层；底板快照里也不画封面。
+        if (!drawingSnapshot && !coverTransitionActive(now)) {
+            drawCoverBitmap(canvas, bmp, coverCx, coverCy, coverSize, rotationDeg)
+        }
+
+        // 单击封面弹"双击打开控制页"提示：大封面画在圆点行、小封面画在时间处，几秒后自动淡出。
+        val hintAlpha = coverHintAlpha(now)
 
         val introAlpha = (1f - p).coerceIn(0f, 1f)
         if (introAlpha > 0.01f) {
@@ -1589,7 +2040,13 @@ internal class FullLyricView @JvmOverloads constructor(
             if (!panelMode) {
                 val firstLineTop = height / 2f - lastScroll
                 val dotsY = firstLineTop - textSizePx * 0.55f
-                drawIntroDots(canvas, contentLeft, contentWidth, dotsY, introAlpha)
+                if (hintAlpha > 0.01f && !coverDocked) {
+                    // 大封面单击：圆点行改画提示。
+                    drawCoverHint(canvas, contentLeft + contentWidth / 2f, dotsY, hintAlpha * introAlpha, centered = true)
+                } else if (!singleLineMode) {
+                    // SuperLyric 单句模式不画圆点（下方改画当前句歌词）。
+                    drawIntroDots(canvas, contentLeft, contentWidth, dotsY, introAlpha)
+                }
             }
         }
 
@@ -1598,7 +2055,10 @@ internal class FullLyricView @JvmOverloads constructor(
         if (textAlpha > 0.01f) {
             // 文字区在封面左侧：右边界=封面左缘-间距，左边界=内容左缘。
             val rightEdge = coverCx - coverSize / 2f - dp(CLOCK_GAP_DP)
-            if (unlocked) {
+            if (hintAlpha > 0.01f && coverDocked) {
+                // 小封面单击：时间处改画提示（居右，取代歌名/时间）。
+                drawCoverHint(canvas, rightEdge, coverCy, textAlpha * hintAlpha, centered = false)
+            } else if (unlocked) {
                 // 解锁后封面左侧提示"歌词已解锁 / 可滑动调整进度"，取代歌名/时间。
                 drawUnlockHint(canvas, contentLeft, rightEdge, coverCy, textAlpha)
             } else {
@@ -1671,6 +2131,36 @@ internal class FullLyricView @JvmOverloads constructor(
         }
     }
 
+    /** 单击封面触发提示（双击窗口内无第二击才弹）。 */
+    private fun triggerCoverHint() {
+        coverTapAt = 0L
+        coverHintAt = SystemClock.elapsedRealtime()
+        invalidate()
+    }
+
+    /** "双击打开控制页"提示的当前透明度：快速淡入、末段淡出；过期即清零（停止重绘）。 */
+    private fun coverHintAlpha(now: Long): Float {
+        if (coverHintAt == 0L) return 0f
+        val t = (now - coverHintAt).toFloat()
+        if (t >= COVER_HINT_MS) {
+            coverHintAt = 0L
+            return 0f
+        }
+        return min(t / 150f, (COVER_HINT_MS - t) / 450f).coerceIn(0f, 1f)
+    }
+
+    /** 画"双击打开控制页"提示：[centered]=以 x 为中心（大封面圆点行），否则以 x 为右缘居右（小封面时间处）。 */
+    private fun drawCoverHint(canvas: Canvas, x: Float, centerY: Float, alpha: Float, centered: Boolean) {
+        clockPaint.textSize = textSizePx * 0.5f
+        clockPaint.alpha = (255f * alpha).roundToInt().coerceIn(0, 255)
+        val tw = clockPaint.measureText(COVER_HINT_TEXT)
+        val fm = clockPaint.fontMetrics
+        val baseline = centerY - (fm.ascent + fm.descent) / 2f
+        val left = if (centered) x - tw / 2f else x - tw
+        canvas.drawText(COVER_HINT_TEXT, left, baseline, clockPaint)
+        clockPaint.alpha = 255
+    }
+
     /** 解锁后封面左侧提示：两行右对齐「歌词已解锁 / 可滑动调整进度」，字号自适应可用宽度。 */
     private fun drawUnlockHint(canvas: Canvas, leftBound: Float, rightEdge: Float, centerY: Float, alpha: Float) {
         val avail = rightEdge - leftBound
@@ -1714,6 +2204,8 @@ internal class FullLyricView @JvmOverloads constructor(
             // 必须消费 DOWN 才能收到 UP（非 clickable 的 View 默认 DOWN 返回 false 就收不到后续事件）。
             MotionEvent.ACTION_DOWN -> {
                 if (inCover || inText) return true
+                // SuperLyric 单句模式：无整首歌词，长按解锁 + 拖动调进度没意义，直接不接管歌词区手势。
+                if (singleLineMode) return false
                 if (panelMode || models.isEmpty()) return false
                 pressDownX = event.x
                 pressDownY = event.y
@@ -1742,8 +2234,23 @@ internal class FullLyricView @JvmOverloads constructor(
             }
             MotionEvent.ACTION_UP -> {
                 if (inCover) {
-                    // 点封面：放大成控制面板（收藏 / 切歌 / 暂停 + “词”返回）。
-                    onCoverTap?.invoke()
+                    if (panelMode) {
+                        // 面板已展开：单击封面即返回歌词（无需双击）。
+                        onCoverTap?.invoke()
+                    } else {
+                        // 非面板态：双击放大成控制面板；单击只弹"双击打开控制页"提示（圆点行/时间处）。
+                        val tnow = SystemClock.elapsedRealtime()
+                        if (tnow - coverTapAt <= COVER_DOUBLE_TAP_MS) {
+                            coverTapAt = 0L
+                            coverHintAt = 0L
+                            handler.removeCallbacks(coverSingleTapRunnable)
+                            onCoverTap?.invoke()
+                        } else {
+                            coverTapAt = tnow
+                            handler.removeCallbacks(coverSingleTapRunnable)
+                            handler.postDelayed(coverSingleTapRunnable, COVER_DOUBLE_TAP_MS)
+                        }
+                    }
                     performClick()
                     return true
                 }
@@ -2074,6 +2581,57 @@ internal class FullLyricView @JvmOverloads constructor(
     }
 
     /** 封面绘制：圆角(方形)/圆形裁剪 + 旋转，源图按短边居中裁成正方形。 */
+    /** 换歌封面过渡是否进行中（飞出 / 飞入 / 等新封面加载）。 */
+    private fun coverTransitionActive(now: Long): Boolean {
+        val exiting = coverExitBitmap != null && now - coverExitAt < COVER_FLY_MS
+        val entering = coverEnterAt != 0L && now - coverEnterAt < COVER_FLY_MS
+        return exiting || entering || coverEnterPending
+    }
+
+    /**
+     * 换歌封面飞出 / 飞入（绝对坐标，独立于整页底板上滑）：
+     * 旧封面向上飞出整屏——大封面态非线性缩到 [COVER_EXIT_SCALE] 飞出，角落停靠态不缩直接飞出；
+     * 新封面加载后从上方非线性飞入到封面槽位（位置 + 大小）；等新封面超时则用当前封面飞入兜底。
+     */
+    private fun drawCoverTransition(canvas: Canvas, now: Long) {
+        if (drawingSnapshot || config.cover == CoverPosition.NONE) return
+        val rotationDeg = if (config.coverShape == CoverShape.CIRCLE_ROTATE) coverRotation else 0f
+
+        // 旧封面飞出。
+        val exit = coverExitBitmap
+        if (exit != null) {
+            if (exit.isRecycled || now - coverExitAt >= COVER_FLY_MS) {
+                coverExitBitmap = null
+            } else {
+                val t = ((now - coverExitAt) / COVER_FLY_MS).coerceIn(0f, 1f)
+                val e = t * t // 非线性：加速飞出
+                val scale = if (coverExitDocked) 1f else lerp(1f, COVER_EXIT_SCALE, e)
+                val cy = lerp(coverExitFromCy, -coverExitFromSize, e) // 中心移出屏幕顶部
+                drawCoverBitmap(canvas, exit, coverExitFromCx, cy, coverExitFromSize * scale, rotationDeg)
+            }
+        }
+
+        // 等新封面加载超时：用当前封面飞入兜底，避免封面一直空着。
+        if (coverEnterPending && coverBitmap != null && now - coverExitAt > COVER_ENTER_MAX_WAIT_MS) {
+            coverEnterAt = now
+            coverEnterPending = false
+        }
+
+        // 新封面飞入。
+        if (coverEnterAt != 0L) {
+            val newCover = coverBitmap
+            if (newCover == null || now - coverEnterAt >= COVER_FLY_MS) {
+                coverEnterAt = 0L
+            } else if (lastCoverSize > 0f) {
+                val t = ((now - coverEnterAt) / COVER_FLY_MS).coerceIn(0f, 1f)
+                val e = easeOutCubic(t) // 非线性：减速到位
+                val cy = lerp(-lastCoverSize, lastCoverCy, e)
+                val size = lastCoverSize * lerp(COVER_EXIT_SCALE, 1f, e)
+                drawCoverBitmap(canvas, newCover, lastCoverCx, cy, size, rotationDeg)
+            }
+        }
+    }
+
     private fun drawCoverBitmap(canvas: Canvas, bmp: Bitmap, cx: Float, cy: Float, size: Float, rotationDeg: Float) {
         if (size <= 0f || bmp.width <= 0 || bmp.height <= 0) return
         val half = size / 2f
@@ -2115,6 +2673,8 @@ internal class FullLyricView @JvmOverloads constructor(
 
     /** 封面停靠进度：0=引导卡居中（大封面），1=角落停靠（from→target easeOutCubic 过渡，可双向）。 */
     private fun coverDockProgress(now: Long): Float {
+        // SuperLyric 单句模式：封面常驻大封面，永不停靠角落。
+        if (singleLineMode && !panelMode) return 0f
         val base = if (dockAnimAt == 0L) {
             dockTarget
         } else {
@@ -2184,6 +2744,8 @@ internal class FullLyricView @JvmOverloads constructor(
         var end: Long = 0L,
         /** 该 token 绘制字号（中文=中文字号，英文=中文+[LATIN_EXTRA_PX]）。 */
         var size: Float = 0f,
+        /** SuperLyric「随机升起」进场：本 token 相对句首的起始延迟（ms），随机非线性。 */
+        var riseDelay: Long = 0L,
     )
 
     private class LineModel(
@@ -2213,6 +2775,7 @@ internal class FullLyricView @JvmOverloads constructor(
         val showTranslation: Boolean,
         val showRoma: Boolean,
         val relativeHighlight: Boolean,
+        val simulateWordTiming: Boolean,
         val lyricTextSize: Int,
         val playerPackage: String?,
     )

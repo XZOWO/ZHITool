@@ -39,6 +39,10 @@ import com.zhitool.rearlyric.lyric.PackageStyle
 import com.zhitool.rearlyric.lyric.PackageStyleState
 import com.zhitool.rearlyric.lyric.RearConfig
 import com.zhitool.rearlyric.lyric.RearConfigState
+import com.zhitool.rearlyric.lyric.BatteryMode
+import com.zhitool.rearlyric.lyric.LyricAnimation
+import com.zhitool.rearlyric.lyric.LyricSource
+import com.zhitool.rearlyric.lyric.LyricSourceState
 import com.zhitool.rearlyric.lyric.TextColorMode
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -62,6 +66,7 @@ fun ConfigScreen(contentPadding: PaddingValues) {
     val baseConfig by RearConfigState.flow.collectAsState()
     val filter by AppFilterState.flow.collectAsState()
     val packageStyles by PackageStyleState.flow.collectAsState()
+    val lyricSource by LyricSourceState.flow.collectAsState()
 
     var showFilterPicker by rememberSaveable { mutableStateOf(false) }
     var showPackagePicker by rememberSaveable { mutableStateOf(false) }
@@ -177,13 +182,49 @@ fun ConfigScreen(contentPadding: PaddingValues) {
                 }
             }
 
+            item { SmallTitle("歌词动画") }
+            item {
+                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    val superLyric = lyricSource == LyricSource.SUPERLYRIC
+                    ArrowPreference(
+                        title = "歌词动画",
+                        summary = if (!superLyric) {
+                            "仅 SuperLyric 数据源可用"
+                        } else when (baseConfig.lyricAnimation) {
+                            LyricAnimation.NONE -> "无"
+                            LyricAnimation.RANDOM_RISE -> "随机升起"
+                        },
+                        onClick = {
+                            if (superLyric) {
+                                val next = if (baseConfig.lyricAnimation == LyricAnimation.RANDOM_RISE) {
+                                    LyricAnimation.NONE
+                                } else {
+                                    LyricAnimation.RANDOM_RISE
+                                }
+                                ConfigStore.save(context, baseConfig.copy(lyricAnimation = next))
+                            }
+                        },
+                    )
+                }
+            }
+
             item { SmallTitle("封面与来源") }
             item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
                     ArrowPreference(
                         title = "歌词数据源",
-                        summary = "Lyricon（词幕生态）",
-                        onClick = { },
+                        summary = when (lyricSource) {
+                            LyricSource.LYRICON -> "词幕（lyricon 生态）"
+                            LyricSource.SUPERLYRIC -> "SuperLyric（实时逐句）"
+                        },
+                        onClick = {
+                            val next = if (lyricSource == LyricSource.LYRICON) {
+                                LyricSource.SUPERLYRIC
+                            } else {
+                                LyricSource.LYRICON
+                            }
+                            ConfigStore.saveLyricSource(context, next)
+                        },
                     )
                     ArrowPreference(
                         title = "封面来源",
@@ -287,6 +328,19 @@ private fun RearConfigEditorContent(
         cfg = cfg,
         onUpdate = onUpdate,
     )
+    SmallTitle("电池与充电")
+    ConfigBatteryCard(
+        cfg = cfg,
+        onUpdate = onUpdate,
+        onChoose = { t, current, options, confirm ->
+            dialogState = ConfigDialogState.Choice(
+                title = t,
+                selectedValue = current,
+                options = options,
+                onConfirm = confirm,
+            )
+        },
+    )
     SmallTitle("安全区与微调")
     ConfigAdjustCard(
         cfg = cfg,
@@ -300,6 +354,41 @@ private fun RearConfigEditorContent(
         state = dialogState,
         onDismiss = { dialogState = null },
     )
+}
+
+@Composable
+private fun ConfigBatteryCard(
+    cfg: RearConfig,
+    onUpdate: (RearConfig) -> Unit,
+    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
+) {
+    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+        ArrowPreference(
+            title = "电池",
+            summary = when (cfg.batteryMode) {
+                BatteryMode.NONE -> "不显示"
+                BatteryMode.WHEN_CHARGING -> "充电时显示"
+                BatteryMode.ALWAYS -> "一直显示"
+            },
+            onClick = {
+                onChoose(
+                    "电池",
+                    cfg.batteryMode.name,
+                    listOf(
+                        ChoiceItem("不显示", BatteryMode.NONE.name),
+                        ChoiceItem("充电时显示", BatteryMode.WHEN_CHARGING.name),
+                        ChoiceItem("一直显示", BatteryMode.ALWAYS.name),
+                    )
+                ) { onUpdate(cfg.copy(batteryMode = BatteryMode.valueOf(it))) }
+            },
+        )
+        SwitchPreference(
+            title = "播放时充电动画",
+            summary = "播放且充电时，歌词背后显示从下到上的液体波浪",
+            checked = cfg.chargeWave,
+            onCheckedChange = { onUpdate(cfg.copy(chargeWave = it)) },
+        )
+    }
 }
 
 @Composable
@@ -460,6 +549,12 @@ private fun ConfigProgressCard(
             summary = "汉字逐字点亮（关闭则整词为单位，较粗）",
             checked = cfg.relativeHighlight,
             onCheckedChange = { onUpdate(cfg.copy(relativeHighlight = it)) },
+        )
+        SwitchPreference(
+            title = "模拟逐字",
+            summary = "无逐字时间的歌曲按时长假装逐字；关闭则整句整句切",
+            checked = cfg.simulateWordTiming,
+            onCheckedChange = { onUpdate(cfg.copy(simulateWordTiming = it)) },
         )
     }
 }

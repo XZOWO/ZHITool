@@ -1,9 +1,13 @@
 package com.zhitool.rearlyric.rear
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -11,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -47,6 +52,7 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -58,18 +64,25 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -81,17 +94,22 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.zhitool.rearlyric.core.MediaControl
 import com.zhitool.rearlyric.core.RootShell
+import com.zhitool.rearlyric.lyric.BatteryMode
 import com.zhitool.rearlyric.lyric.CoverPosition
 import com.zhitool.rearlyric.lyric.CoverShape
 import com.zhitool.rearlyric.lyric.LyricBus
 import com.zhitool.rearlyric.lyric.LyricColors
 import com.zhitool.rearlyric.lyric.LyricFrameRate
+import com.zhitool.rearlyric.lyric.LyricSource
+import com.zhitool.rearlyric.lyric.LyricSourceState
 import com.zhitool.rearlyric.lyric.PackageStyleState
 import com.zhitool.rearlyric.lyric.RearConfigState
 import com.zhitool.rearlyric.lyric.TextColorMode
+import com.zhitool.rearlyric.tools.charge.LiquidFillView
 import io.github.proify.lyricon.lyric.model.Song
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -214,6 +232,7 @@ private fun RearLyricScreen() {
     val cover by LyricBus.cover.collectAsState()
     val playing by LyricBus.playingFlow.collectAsState()
     val playerPackage by LyricBus.playerPackage.collectAsState()
+    val lyricSource by LyricSourceState.flow.collectAsState()
     val rearDisplayInfo by produceState(RearDisplayHelper.getRearDisplayInfo(), Unit) {
         value = withContext(Dispatchers.Default) { RearDisplayHelper.getRearDisplayInfo(forceRefresh = true) }
     }
@@ -278,9 +297,70 @@ private fun RearLyricScreen() {
     }
 
     val density = LocalDensity.current
+    val context = LocalContext.current
+
+    // 充电相关：自己观察电池（充电态 + 电量）——据此画歌词背后液体波浪 + 小锁位置电池，
+    // 不再跳到独立充电页（充电页由 ChargeOverlay 在「未投放歌词」时才起）。
+    var charging by remember { mutableStateOf(false) }
+    var batteryLevel by remember { mutableStateOf(0) }
+    DisposableEffect(Unit) {
+        val battR = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                i ?: return
+                val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                charging = plugged != 0 ||
+                    status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
+                val l = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val s = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                if (l >= 0 && s > 0) batteryLevel = l * 100 / s
+            }
+        }
+        ContextCompat.registerReceiver(
+            context, battR, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        onDispose { runCatching { context.unregisterReceiver(battR) } }
+    }
+    // 液体波浪：「播放时充电动画」开 + 正在充电时显示，整体淡入淡出避免硬切。
+    val chargeWaveAlpha by animateFloatAsState(
+        targetValue = if (charging && cfg.chargeWave) 1f else 0f,
+        animationSpec = tween(700, easing = FastOutSlowInEasing),
+        label = "chargeWaveAlpha",
+    )
+    // 液体颜色：封面取色背景时由封面取（液面提亮、底压暗，专门优化的渐变）；否则用淡一点的绿。
+    val liquidTop: Int
+    val liquidBottom: Int
+    val waveSoftness: Float
+    if (cfg.dynamicBackground) {
+        liquidTop = coverColors.highlight.lighten(0.16f).toArgb()
+        liquidBottom = coverColors.background.darken(0.34f).toArgb()
+        waveSoftness = 0.5f
+    } else {
+        liquidTop = Color(0xFF7FE49B).toArgb()
+        liquidBottom = Color(0xFF44C36C).toArgb()
+        waveSoftness = 0.42f
+    }
+    // 电池：不显示 / 充电时 / 一直；充电未满才带闪电。
+    val showBattery = when (cfg.batteryMode) {
+        BatteryMode.NONE -> false
+        BatteryMode.WHEN_CHARGING -> charging
+        BatteryMode.ALWAYS -> true
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedCoverBackground(bgColors)
+
+        // 播放时充电：歌词背后从下到上的柔化液体波浪（颜色随封面取色）。
+        if (chargeWaveAlpha > 0.001f) {
+            ChargeBackdrop(
+                level = batteryLevel,
+                alpha = chargeWaveAlpha * waveSoftness,
+                topColor = liquidTop,
+                bottomColor = liquidBottom,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         // 控制面板暗底：铺满整屏（含左侧非安全区），压暗背景——歌词在 FullLyricView 内淡到背景亮度（不消失），
         // 此暗底在其下压暗整体，封面/进度条/按键叠其上；歌词作为暗背景隐约可见（最早方案）。
@@ -336,6 +416,7 @@ private fun RearLyricScreen() {
                     view.setPadding(padLeftPx, padTopPx, padRightPx, padBottomPx)
                     // 面板展开进度：驱动封面回到「首句前大封面」、歌词淡到背景（复用 FullLyricView 现成排版/动画）。
                     view.setPanelProgress(panelProgress)
+                    view.setSingleLineMode(lyricSource == LyricSource.SUPERLYRIC)
                     view.bind(
                         song = song,
                         positionMs = currentPosition,
@@ -436,6 +517,32 @@ private fun RearLyricScreen() {
             }
         }
 
+        // 电池：画在小锁位置（左侧摄像头空隙、竖直居中）。iOS 式电池：数字 + 充电未满时闪电；
+        // 长按解锁出锁徽标时让位（!lockVisible）。
+        if (showBattery && !lockVisible) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val viewLeft = lyricLeftEdgeDp(maxWidth, cfg.safeAreaLeft)
+                val battCenterX = viewLeft - 77.dp + (cfg.lockOffset * 2).dp
+                val battW = 28.dp      // 长度 = 原 40 的 0.7（左缘不变，从右边缩）
+                val battH = 15.2.dp    // 高度 = 原 19 的 0.8
+                // 左缘按原 40dp 宽时的位置锚定（保持左侧不变，宽度缩小即从右边缩）；夹到屏内避免被裁。
+                val battLeft = (battCenterX - 20.dp).coerceAtLeast(6.dp)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = battLeft)
+                        .size(width = battW, height = battH),
+                ) {
+                    BatteryBadge(
+                        level = batteryLevel,
+                        charging = charging,
+                        showBolt = charging && batteryLevel < 100,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        }
+
         // 紧急关闭按钮：左侧摄像头空白区"上二分之一"的正中。正常投在背屏时被
         // 摄像头模组物理遮挡；一旦误投到正面屏幕，点它即可关闭歌词页。控制面板之上仍可点。
         Box(
@@ -474,14 +581,27 @@ private fun CoverPanelProgress(
             delay(1000)
         }
     }
-    // 进入音量模式时读取系统当前音量。
     var volFrac by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(volumeMode) {
-        if (volumeMode) volFrac = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maxVol
-    }
-
     var dragging by remember { mutableStateOf(false) }
     var dragFraction by remember { mutableFloatStateOf(0f) }
+    // 音量模式：实时跟随系统音量——进入时读一次，之后轮询；物理音量键或其它来源改音量时音量条也同步移动。
+    // 检测到外部变化时重置 1.5s 自动还原计时（onVolumeInteract），避免调到一半音量条消失；拖动中不打断手指。
+    LaunchedEffect(volumeMode) {
+        if (!volumeMode) return@LaunchedEffect
+        var lastVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+        volFrac = lastVol.toFloat() / maxVol
+        while (true) {
+            val v = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (v != lastVol) {
+                lastVol = v
+                if (!dragging) {
+                    volFrac = v.toFloat() / maxVol
+                    onVolumeInteract()
+                }
+            }
+            delay(120)
+        }
+    }
     val dur = duration.coerceAtLeast(1L)
     val frac = when {
         dragging -> dragFraction
@@ -639,6 +759,14 @@ private fun LockBadge(
  * 基准在屏幕 1/3 处；左安全区微调每步 1dp：负值让视图向左加宽、伸进左侧摄像头区（不再卡在 1/3 处），
  * 正值把左缘右移、视图变窄。夹在 [0, maxWidth-100dp] 之间。
  */
+/** 颜色提亮：向白色插值（充电液面用）。 */
+private fun Color.lighten(f: Float): Color =
+    Color(red + (1f - red) * f, green + (1f - green) * f, blue + (1f - blue) * f, 1f)
+
+/** 颜色压暗：向黑色插值（充电液体底部用）。 */
+private fun Color.darken(f: Float): Color =
+    Color(red * (1f - f), green * (1f - f), blue * (1f - f), 1f)
+
 private fun lyricLeftEdgeDp(maxWidth: Dp, safeAreaLeft: Int): Dp =
     (maxWidth / 3f - 23.dp + safeAreaLeft.dp).coerceIn(0.dp, (maxWidth - 100.dp).coerceAtLeast(0.dp))
 
@@ -828,6 +956,97 @@ private fun AnimatedCoverBackground(colors: LyricColors) {
                 radius = size.maxDimension * 0.7f,
             )
         )
+    }
+}
+
+/**
+ * 充电液体波浪层（播放时充电）：歌词背后从底部上升的柔化液体（复用 [LiquidFillView]，竖向渐变色由
+ * [topColor]/[bottomColor] 指定——封面取色时随封面）。整体由 [alpha] 控制淡入淡出 + 压低不透明度，
+ * 不盖住歌词。电量数字改由 [BatteryBadge] 在小锁位置呈现，这里不再画。
+ */
+@Composable
+private fun ChargeBackdrop(level: Int, alpha: Float, topColor: Int, bottomColor: Int, modifier: Modifier = Modifier) {
+    val fill = remember { Animatable(0f) }
+    LaunchedEffect(level) { fill.animateTo((level / 100f).coerceIn(0f, 1f), tween(1500)) }
+    AndroidView(
+        modifier = modifier.alpha(alpha.coerceIn(0f, 1f)),
+        factory = { LiquidFillView(it) },
+        update = {
+            it.setLiquidColors(topColor, bottomColor)
+            it.setFillLevel(fill.value)
+        },
+    )
+}
+
+/**
+ * iOS 式电池徽标（画在小锁位置）：圆角电池壳 + 从左按电量填充（充电=绿、否则=白）+ 正极小凸点；
+ * 左侧白色加粗电量数字；[showBolt] 时右侧叠充电闪电。充满（100）由调用方令 showBolt=false → 只显示数字。
+ */
+@Composable
+private fun BatteryBadge(level: Int, charging: Boolean, showBolt: Boolean, modifier: Modifier = Modifier) {
+    val numberPaint = remember {
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+            textAlign = android.graphics.Paint.Align.LEFT
+            setShadowLayer(5f, 0f, 1f, android.graphics.Color.argb(150, 0, 0, 0))
+        }
+    }
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val nubW = w * 0.05f
+        val bodyW = w - nubW
+        val corner = h * 0.34f
+        // 电池外壳（空电浅底）。
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.20f),
+            size = Size(bodyW, h),
+            cornerRadius = CornerRadius(corner, corner),
+        )
+        // 按电量从左填充：充电=绿、否则=白；裁到外壳圆角，右缘平直。
+        val frac = (level / 100f).coerceIn(0f, 1f)
+        val fillColor = if (charging) Color(0xFF34C759) else Color.White.copy(alpha = 0.85f)
+        val clip = Path().apply {
+            addRoundRect(RoundRect(0f, 0f, bodyW, h, CornerRadius(corner, corner)))
+        }
+        clipPath(clip) {
+            drawRect(color = fillColor, size = Size(bodyW * frac, h))
+        }
+        // 正极小凸点。
+        val nubH = h * 0.36f
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.5f),
+            topLeft = Offset(bodyW + nubW * 0.05f, (h - nubH) / 2f),
+            size = Size(nubW * 0.85f, nubH),
+            cornerRadius = CornerRadius(nubW * 0.4f, nubW * 0.4f),
+        )
+        // 数字 + 闪电作为一个整体居中排在整块电池上（紧挨、无间距），而非数字左 / 闪电右。
+        numberPaint.textSize = h * 0.66f
+        val fm = numberPaint.fontMetrics
+        val baseline = h / 2f - (fm.ascent + fm.descent) / 2f
+        val text = "$level"
+        val tw = numberPaint.measureText(text)
+        val bh = h * 0.64f
+        val bw = bh * 0.6f
+        val gap = if (showBolt) h * 0.03f else 0f
+        val groupW = tw + if (showBolt) gap + bw else 0f
+        val startX = (bodyW - groupW) / 2f
+        drawIntoCanvas { it.nativeCanvas.drawText(text, startX, baseline, numberPaint) }
+        if (showBolt) {
+            val left = startX + tw + gap
+            val top = (h - bh) / 2f
+            val bolt = Path().apply {
+                moveTo(left + bw * 0.62f, top)
+                lineTo(left + bw * 0.16f, top + bh * 0.58f)
+                lineTo(left + bw * 0.46f, top + bh * 0.58f)
+                lineTo(left + bw * 0.38f, top + bh)
+                lineTo(left + bw * 0.86f, top + bh * 0.40f)
+                lineTo(left + bw * 0.54f, top + bh * 0.40f)
+                close()
+            }
+            drawPath(bolt, color = Color.White)
+        }
     }
 }
 

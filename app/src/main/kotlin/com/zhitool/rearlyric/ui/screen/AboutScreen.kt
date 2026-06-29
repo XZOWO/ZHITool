@@ -58,8 +58,9 @@ private data class CreditProject(val name: String, val role: String, val url: St
 private val CREDIT_PROJECTS = listOf(
     CreditProject("REAREye", "UI 设计 / 背屏保活", "https://github.com/killerprojecte/REAREye"),
     CreditProject("词幕 Lyricon", "背屏歌词数据源", "https://github.com/tomakino/lyricon"),
+    CreditProject("SuperLyric", "实时逐句歌词源", "https://github.com/HChenX/SuperLyric"),
     CreditProject("MRSS", "背屏投屏 / 截录 / 充电 / 通知方案", "https://github.com/GoldenglowSusie"),
-    CreditProject("LyricProvider", "歌词数据来源", "https://github.com/tomakino/LyricProvider"),
+    CreditProject("LyricProvider", "词幕歌词提供者", "https://github.com/tomakino/LyricProvider"),
 )
 
 /** 开源引用（使用到的第三方库）。url 为空则不可跳转，仅展示。 */
@@ -73,6 +74,7 @@ private val OPEN_SOURCE_REFS = listOf(
     OpenSourceRef("libxposed", "Xposed 模块 API", "https://github.com/libxposed"),
     OpenSourceRef("AndroidViewAnimations", "歌词进出场动画", "https://github.com/daimajia/AndroidViewAnimations"),
     OpenSourceRef("kotlinx.coroutines", "协程", "https://github.com/Kotlin/kotlinx.coroutines"),
+    OpenSourceRef("SuperLyricApi", "SuperLyric 接收 API", "https://github.com/HChenX/SuperLyricApi"),
     OpenSourceRef("AndroidX Palette", "封面取色"),
 )
 
@@ -242,6 +244,7 @@ private fun CreditsScreen(contentPadding: PaddingValues, onBack: () -> Unit) {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
                     InfoRow("REAREye / MRSS", "GPL-3.0")
                     InfoRow("词幕 Lyricon / LyricProvider", "Apache-2.0")
+                    InfoRow("SuperLyric / SuperLyricApi", "LGPL-2.1")
                     InfoRow("本项目", "GPL-3.0")
                 }
             }
