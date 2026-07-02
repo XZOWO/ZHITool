@@ -1,7 +1,7 @@
 {
-  "versionCode": 5,
-  "versionName": "1.0.0",
-  "changelog": "ZHITool 1.0.0 首个正式版：新增第二套歌词方案 SuperLyric、歌词进度自驱动，以及一系列背屏歌词显示与交互增强。\n新增「歌词数据源」：词幕（整首逐字）/ SuperLyric（实时逐句），可随时切换。\n新增「歌词动画」：随机升起（中文逐字、英文逐词，从底部随机时序非线性升起进场）。\n歌词进度改由系统媒体会话自驱动，息屏也能继续滚动。\n充电 + 播放时在歌词背后绘制液体波浪；新增 iOS 式电池显示（不显示 / 充电时 / 一直显示）。\n切歌封面飞入飞出；封面双击进控制页、单击提示；新增「模拟逐字」开关。\n主页投放重构为三个带恢复态开关；控制面板音量条实时跟随物理音量键。\n修复切歌封面重复动画、纯音乐封面冲突、三行歌词竖向截断等。\nSuperLyric 数据源需安装 SuperLyric 模块；词幕数据源沿用 lyricon 生态。",
+  "versionCode": 6,
+  "versionName": "1.0.1",
+  "changelog": "ZHITool 1.0.1 更新：\n新增「音乐律动」音频可视化背景，三种背景可选：默认、律动、声谱。\n「音乐律动」组可调：背景选择、律动强度、律动恢复速度、声谱高度、低音 / 非低音高光增益。\n副句显示动画重做。",
   "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
   "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
   "lyricon": {
