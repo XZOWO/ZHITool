@@ -43,6 +43,8 @@ import com.zhitool.rearlyric.lyric.BatteryMode
 import com.zhitool.rearlyric.lyric.LyricAnimation
 import com.zhitool.rearlyric.lyric.LyricSource
 import com.zhitool.rearlyric.lyric.LyricSourceState
+import com.zhitool.rearlyric.lyric.RearBackground
+import com.zhitool.rearlyric.lyric.RhythmDecay
 import com.zhitool.rearlyric.lyric.TextColorMode
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -315,6 +317,22 @@ private fun RearConfigEditorContent(
             )
         },
     )
+    SmallTitle("音乐律动")
+    ConfigRhythmCard(
+        cfg = cfg,
+        onUpdate = onUpdate,
+        onChoose = { t, current, options, confirm ->
+            dialogState = ConfigDialogState.Choice(
+                title = t,
+                selectedValue = current,
+                options = options,
+                onConfirm = confirm,
+            )
+        },
+        onEditInt = { t, value, suffix, allowNegative, confirm ->
+            dialogState = ConfigDialogState.IntInput(t, value, suffix, allowNegative, confirm)
+        },
+    )
     SmallTitle("文字与布局")
     ConfigTextCard(
         cfg = cfg,
@@ -354,6 +372,157 @@ private fun RearConfigEditorContent(
         state = dialogState,
         onDismiss = { dialogState = null },
     )
+}
+
+/**
+ * 音乐律动：背景模式（默认 / 律动 / 声谱，独立强度+回落）+ 三个各自独立的开关——歌词发光 / 歌词律动 /
+ * 空间律动。任一开启即需内录音频（root 自授权，不弹窗），仅播放时驱动；声谱柱色跟随「封面取色背景」；
+ * 缩放类（歌词律动+空间律动）共用「律动强度/律动回落速度」、发光单列「歌词发光强度」，两团增益全体共用。
+ */
+@Composable
+private fun ConfigRhythmCard(
+    cfg: RearConfig,
+    onUpdate: (RearConfig) -> Unit,
+    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
+    onEditInt: (title: String, value: Int, suffix: String, allowNegative: Boolean, onConfirm: (Int) -> Unit) -> Unit,
+) {
+    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+        ArrowPreference(
+            title = "背景",
+            summary = when (cfg.background) {
+                RearBackground.DEFAULT -> "默认背景"
+                RearBackground.PULSE -> "律动背景（亮光随音乐波动）"
+                RearBackground.SPECTRUM -> "声谱背景（默认背景 + 声谱律动）"
+            },
+            onClick = {
+                onChoose(
+                    "背景",
+                    cfg.background.name,
+                    listOf(
+                        ChoiceItem("默认背景", RearBackground.DEFAULT.name),
+                        ChoiceItem("律动背景", RearBackground.PULSE.name),
+                        ChoiceItem("声谱背景", RearBackground.SPECTRUM.name),
+                    )
+                ) { onUpdate(cfg.copy(background = RearBackground.valueOf(it))) }
+            },
+        )
+        if (cfg.background != RearBackground.DEFAULT) {
+            ArrowPreference(
+                title = "背景律动强度",
+                summary = "${cfg.rhythmIntensity}（0–100，越大波动越夸张，仅背景）",
+                onClick = {
+                    onEditInt("背景律动强度", cfg.rhythmIntensity, "", false) {
+                        onUpdate(cfg.copy(rhythmIntensity = it.coerceIn(0, 100)))
+                    }
+                },
+            )
+            ArrowPreference(
+                title = "背景回落速度",
+                summary = rhythmDecayLabel(cfg.rhythmDecay) + "（仅背景，回落平滑快慢）",
+                onClick = {
+                    onChoose(
+                        "背景回落速度",
+                        cfg.rhythmDecay.name,
+                        RhythmDecay.entries.map { ChoiceItem(rhythmDecayLabel(it), it.name) },
+                    ) { onUpdate(cfg.copy(rhythmDecay = RhythmDecay.valueOf(it))) }
+                },
+            )
+            if (cfg.background == RearBackground.SPECTRUM) {
+                ArrowPreference(
+                    title = "声谱高度",
+                    summary = "${cfg.spectrumHeight}%（满格时柱高占屏比，可超 100）",
+                    onClick = {
+                        onEditInt("声谱高度", cfg.spectrumHeight, "%", false) {
+                            onUpdate(cfg.copy(spectrumHeight = it.coerceIn(10, 300)))
+                        }
+                    },
+                )
+            }
+        }
+        // 三个各自独立的开关：歌词发光 / 歌词律动 / 空间律动。
+        SwitchPreference(
+            title = "歌词发光",
+            summary = "当前句高亮随鼓点叠加发光光晕；会额外启动内录，增加功耗",
+            checked = cfg.lyricGlow,
+            onCheckedChange = { onUpdate(cfg.copy(lyricGlow = it)) },
+        )
+        if (cfg.lyricGlow) {
+            ArrowPreference(
+                title = "歌词发光强度",
+                summary = "${cfg.lyricGlowIntensity}%（只影响发光光晕强弱，不影响缩放幅度）",
+                onClick = {
+                    onEditInt("歌词发光强度", cfg.lyricGlowIntensity, "%", false) {
+                        onUpdate(cfg.copy(lyricGlowIntensity = it.coerceIn(0, 300)))
+                    }
+                },
+            )
+        }
+        SwitchPreference(
+            title = "歌词律动",
+            summary = "整屏歌词随节奏整体缩放（锚定当前句、不偏移）；会额外启动内录，增加功耗",
+            checked = cfg.lyricRhythm,
+            onCheckedChange = { onUpdate(cfg.copy(lyricRhythm = it)) },
+        )
+        SwitchPreference(
+            title = "空间律动",
+            summary = "封面与控制面板按钮随节奏缩放；会额外启动内录，增加功耗",
+            checked = cfg.controlRhythm,
+            onCheckedChange = { onUpdate(cfg.copy(controlRhythm = it)) },
+        )
+        // 缩放类律动（歌词律动 + 空间律动）共用的强度/回落，任一开启即显示。
+        if (cfg.lyricRhythm || cfg.controlRhythm) {
+            ArrowPreference(
+                title = "律动强度",
+                summary = "${cfg.uiRhythmIntensity}（0–100，控制歌词/封面/按钮缩放幅度，独立于背景）",
+                onClick = {
+                    onEditInt("律动强度", cfg.uiRhythmIntensity, "", false) {
+                        onUpdate(cfg.copy(uiRhythmIntensity = it.coerceIn(0, 100)))
+                    }
+                },
+            )
+            ArrowPreference(
+                title = "律动回落速度",
+                summary = rhythmDecayLabel(cfg.uiRhythmDecay) + "（仅歌词/空间律动，比背景整体更慢，同档更柔）",
+                onClick = {
+                    onChoose(
+                        "律动回落速度",
+                        cfg.uiRhythmDecay.name,
+                        RhythmDecay.entries.map { ChoiceItem(rhythmDecayLabel(it), it.name) },
+                    ) { onUpdate(cfg.copy(uiRhythmDecay = RhythmDecay.valueOf(it))) }
+                },
+            )
+        }
+        // 低音-非低音增益：背景律动/声谱或任一 UI 律动开启即显示（共用）。
+        val anyRhythm = cfg.lyricGlow || cfg.lyricRhythm || cfg.controlRhythm
+        if (cfg.background == RearBackground.PULSE || anyRhythm) {
+            ArrowPreference(
+                title = "低音高光增益",
+                summary = "${cfg.glowPercGain}%（低音反应强度）",
+                onClick = {
+                    onEditInt("低音高光增益", cfg.glowPercGain, "%", false) {
+                        onUpdate(cfg.copy(glowPercGain = it.coerceIn(0, 1000)))
+                    }
+                },
+            )
+            ArrowPreference(
+                title = "非低音高光增益",
+                summary = "${cfg.glowHarmGain}%（非低音反应强度）",
+                onClick = {
+                    onEditInt("非低音高光增益", cfg.glowHarmGain, "%", false) {
+                        onUpdate(cfg.copy(glowHarmGain = it.coerceIn(0, 1000)))
+                    }
+                },
+            )
+        }
+    }
+}
+
+private fun rhythmDecayLabel(decay: RhythmDecay): String = when (decay) {
+    RhythmDecay.VERY_FAST -> "极快"
+    RhythmDecay.FAST -> "快"
+    RhythmDecay.MEDIUM -> "中"
+    RhythmDecay.SLOW -> "慢"
+    RhythmDecay.VERY_SLOW -> "极慢"
 }
 
 @Composable
@@ -555,6 +724,12 @@ private fun ConfigProgressCard(
             summary = "无逐字时间的歌曲按时长假装逐字；关闭则整句整句切",
             checked = cfg.simulateWordTiming,
             onCheckedChange = { onUpdate(cfg.copy(simulateWordTiming = it)) },
+        )
+        SwitchPreference(
+            title = "逐字抬起",
+            summary = "未唱文字下沉、唱到时抬起回正；关闭则未唱/已唱文字保持同一水平线",
+            checked = cfg.sinkAnimation,
+            onCheckedChange = { onUpdate(cfg.copy(sinkAnimation = it)) },
         )
     }
 }

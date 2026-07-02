@@ -18,6 +18,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -57,9 +58,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -81,6 +84,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -107,8 +111,11 @@ import com.zhitool.rearlyric.lyric.LyricFrameRate
 import com.zhitool.rearlyric.lyric.LyricSource
 import com.zhitool.rearlyric.lyric.LyricSourceState
 import com.zhitool.rearlyric.lyric.PackageStyleState
+import com.zhitool.rearlyric.lyric.RearBackground
 import com.zhitool.rearlyric.lyric.RearConfigState
+import com.zhitool.rearlyric.lyric.RhythmDecay
 import com.zhitool.rearlyric.lyric.TextColorMode
+import com.zhitool.rearlyric.tools.audio.AudioVisualizer
 import com.zhitool.rearlyric.tools.charge.LiquidFillView
 import io.github.proify.lyricon.lyric.model.Song
 import kotlinx.coroutines.Dispatchers
@@ -116,8 +123,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class RearLyricActivity : ComponentActivity() {
 
@@ -348,8 +359,35 @@ private fun RearLyricScreen() {
         BatteryMode.ALWAYS -> true
     }
 
+    // 三个独立律动开关（歌词发光/歌词律动/空间律动）：任一开启就持有内录（关闭全部则不启动）。
+    // 先算"反应度"能量（× 低音-非低音增益，两团各自反应强度，背景与 UI 共用）；
+    // 再分两路各乘独立强度：motion（歌词律动 + 空间律动的缩放，× 控件律动强度 uiRhythmIntensity）、
+    // glow（歌词发光光晕，× 发光强度 lyricGlowIntensity），互不影响。
+    val rhythmActive = cfg.lyricGlow || cfg.lyricRhythm || cfg.controlRhythm
+    val rhythmEnergy = rememberRhythmEnergy(active = rhythmActive, decay = cfg.uiRhythmDecay)
+    val percBase = rhythmEnergy.perc * (cfg.glowPercGain / 100f)
+    val harmBase = rhythmEnergy.harm * (cfg.glowHarmGain / 100f)
+    val uiGain = 0.6f + (cfg.uiRhythmIntensity / 100f).coerceIn(0f, 1f) * 1.8f
+    val glowGain = (cfg.lyricGlowIntensity / 100f).coerceIn(0f, 3f)
+    // motion 只在歌词律动或空间律动开时才有值；glow 只在歌词发光开时才有值（下游按各自开关再门控一次）。
+    val motionActive = cfg.lyricRhythm || cfg.controlRhythm
+    val motionPerc = if (motionActive) (percBase * uiGain).coerceIn(0f, 1f) else 0f
+    val motionHarm = if (motionActive) (harmBase * uiGain).coerceIn(0f, 1f) else 0f
+    val glowPerc = if (cfg.lyricGlow) (percBase * glowGain).coerceIn(0f, 1f) else 0f
+    val glowHarm = if (cfg.lyricGlow) (harmBase * glowGain).coerceIn(0f, 1f) else 0f
+
     Box(modifier = Modifier.fillMaxSize()) {
-        AnimatedCoverBackground(bgColors)
+        RearBackgroundLayer(
+            colors = bgColors,
+            mode = cfg.background,
+            intensity = cfg.rhythmIntensity,
+            decay = cfg.rhythmDecay,
+            spectrumHeight = cfg.spectrumHeight,
+            percGain = cfg.glowPercGain / 100f,
+            harmGain = cfg.glowHarmGain / 100f,
+            // 选了律动/声谱即持有内录（投影一次、无感）；暂停/无声时内录是静音→柱子自然归零。
+            active = cfg.background != RearBackground.DEFAULT,
+        )
 
         // 播放时充电：歌词背后从下到上的柔化液体波浪（颜色随封面取色）。
         if (chargeWaveAlpha > 0.001f) {
@@ -417,6 +455,10 @@ private fun RearLyricScreen() {
                     // 面板展开进度：驱动封面回到「首句前大封面」、歌词淡到背景（复用 FullLyricView 现成排版/动画）。
                     view.setPanelProgress(panelProgress)
                     view.setSingleLineMode(lyricSource == LyricSource.SUPERLYRIC)
+                    view.setAudioEnergy(
+                        glowPerc, glowHarm, motionPerc, motionHarm,
+                        cfg.lyricGlow, cfg.lyricRhythm, cfg.controlRhythm,
+                    )
                     view.bind(
                         song = song,
                         positionMs = currentPosition,
@@ -450,6 +492,8 @@ private fun RearLyricScreen() {
             playing = playing,
             playerPackage = playerPackage,
             onVolume = { volumeMode = true; volumeTick++ },
+            // 按钮属"空间律动"，只在 controlRhythm 开时脉动（歌词律动单开时按钮不动）。
+            buttonPulse = if (cfg.controlRhythm) motionPerc else 0f,
         )
 
         // 拖动调整进度时，正中那句歌词左侧显示「时间 + 细横线」单行。细横线左端固定（=原 11dp 线的左端，
@@ -791,6 +835,8 @@ private fun CoverPanelControls(
     playing: Boolean,
     playerPackage: String?,
     onVolume: () -> Unit,
+    /** 控件律动能量（0..1，已按用户增益换算）：驱动按钮随鼓点轻微缩放；0=不缩放（关闭/无声）。 */
+    buttonPulse: Float = 0f,
 ) {
     // 完全收起后不占位、不拦截触控（退出动画跑完才移除）。
     if (!expanded && progress <= 0.001f) return
@@ -840,6 +886,7 @@ private fun CoverPanelControls(
                             favTick++
                         }
                     },
+                    pulse = buttonPulse,
                 ) {
                     Icon(
                         imageVector = if (media.isFavorited) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
@@ -849,7 +896,7 @@ private fun CoverPanelControls(
                     )
                 }
             }
-            PanelButton(onClick = { MediaControl.previous(context, playerPackage) }) {
+            PanelButton(onClick = { MediaControl.previous(context, playerPackage) }, pulse = buttonPulse) {
                 Icon(
                     imageVector = Icons.Rounded.SkipPrevious,
                     contentDescription = "上一首",
@@ -857,7 +904,7 @@ private fun CoverPanelControls(
                     modifier = Modifier.size(26.dp),
                 )
             }
-            PanelButton(onClick = { MediaControl.playPause(context, playerPackage) }) {
+            PanelButton(onClick = { MediaControl.playPause(context, playerPackage) }, pulse = buttonPulse) {
                 Icon(
                     imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                     contentDescription = if (playing) "暂停" else "播放",
@@ -865,7 +912,7 @@ private fun CoverPanelControls(
                     modifier = Modifier.size(32.dp),
                 )
             }
-            PanelButton(onClick = { MediaControl.next(context, playerPackage) }) {
+            PanelButton(onClick = { MediaControl.next(context, playerPackage) }, pulse = buttonPulse) {
                 Icon(
                     imageVector = Icons.Rounded.SkipNext,
                     contentDescription = "下一首",
@@ -874,7 +921,7 @@ private fun CoverPanelControls(
                 )
             }
             // 音量：点击后下方进度条变为音量调整条（1.5s 未触控自动还原成进度条）。返回歌词改为点封面。
-            PanelButton(onClick = { onVolume() }) {
+            PanelButton(onClick = { onVolume() }, pulse = buttonPulse) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.VolumeUp,
                     contentDescription = "音量",
@@ -886,23 +933,32 @@ private fun CoverPanelControls(
     }
 }
 
-/** 控制面板上统一尺寸的圆形按钮（内容可为图标或“词”文字）。 */
+/** 控制面板上统一尺寸的圆形按钮（内容可为图标或"词"文字）；[pulse]（0..1）随音乐轻微放大，不影响点击区域。 */
 @Composable
 private fun PanelButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
+    pulse: Float = 0f,
     content: @Composable () -> Unit,
 ) {
     Box(
         modifier = Modifier
             .size(40.dp)
             .clip(CircleShape)
-            .clickable(enabled = enabled) { onClick() },
+            .clickable(enabled = enabled) { onClick() }
+            .graphicsLayer {
+                val s = 1f + pulse.coerceIn(0f, 1f) * AUDIO_BUTTON_PULSE
+                scaleX = s
+                scaleY = s
+            },
         contentAlignment = Alignment.Center,
     ) {
         content()
     }
 }
+
+/** 控件律动：面板按钮随鼓点能量放大的最大幅度（比例）。 */
+private const val AUDIO_BUTTON_PULSE = 0.22f
 
 @Composable
 private fun EmergencyCloseButton() {
@@ -934,29 +990,294 @@ private fun EmergencyCloseButton() {
     }
 }
 
+/** 歌词发光/控件律动读取的平滑能量（0..1，攻击用固定的 [UI_RHYTHM_ATTACK]、回落按 [RhythmDecay]，未乘用户增益）。 */
+private class RhythmEnergy {
+    var perc by mutableFloatStateOf(0f)
+    var harm by mutableFloatStateOf(0f)
+}
+
+/**
+ * 歌词发光 + 控件随音乐律动的音频能量源：与 [RearBackgroundLayer] **各自独立**持有 root 内录
+ * （[AudioVisualizer] 内部按引用计数支持多方各自开关，互不影响）——这样背景模式=默认时也能单独
+ * 开启歌词发光/控件律动，反之亦然。[active] 关闭时立即回落到 0（不残留旧能量）。
+ */
 @Composable
-private fun AnimatedCoverBackground(colors: LyricColors) {
+private fun rememberRhythmEnergy(active: Boolean, decay: RhythmDecay): RhythmEnergy {
+    val context = LocalContext.current
+    val energy = remember { RhythmEnergy() }
+    DisposableEffect(active) {
+        if (active) AudioVisualizer.startCapture(context)
+        onDispose { if (active) AudioVisualizer.stopCapture(context) }
+    }
+    val decayFactor = rememberUpdatedState(uiDecayFactorOf(decay))
+    LaunchedEffect(active) {
+        if (!active) {
+            energy.perc = 0f
+            energy.harm = 0f
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos {
+                val fall = decayFactor.value
+                val grp = AudioVisualizer.groups
+                // 攻击系数用比背景律动（ATTACK_BANDS=0.55）更平滑的 UI_RHYTHM_ATTACK：背景是大面积
+                // 模糊光斑，快起快落看着"弹"；这里驱动的是文字/封面/按钮的**缩放**，逐帧原始能量的
+                // 高频抖动会被放大成肉眼可见的"颤"，故起落都要更柔和才站得住。
+                val tp = grp.getOrElse(0) { 0f }
+                energy.perc += (tp - energy.perc) * (if (tp > energy.perc) UI_RHYTHM_ATTACK else fall)
+                val th = grp.getOrElse(1) { 0f }
+                energy.harm += (th - energy.harm) * (if (th > energy.harm) UI_RHYTHM_ATTACK else fall)
+            }
+        }
+    }
+    return energy
+}
+
+/**
+ * 背屏背景层（取代旧 AnimatedCoverBackground）：默认=封面取色渐变 + 缓慢游走的高光团；
+ * [RearBackground.PULSE]=高光团亮度/半径随音乐能量脉动 + 一团中心脉冲；
+ * [RearBackground.SPECTRUM]=默认背景之上叠底部频谱柱（柱色跟随封面取色，半透明不挡歌词）。
+ *
+ * 音频数据来自 [AudioVisualizer]：[active] 期间引用计数持有 Visualizer；回调线程写裸值、
+ * 这里每帧读出做攻击/衰减平滑（快起慢落，律动更"弹"），[level] 状态每帧变化驱动 Canvas 重绘。
+ */
+@Composable
+private fun RearBackgroundLayer(
+    colors: LyricColors,
+    mode: RearBackground,
+    intensity: Int,
+    decay: RhythmDecay,
+    spectrumHeight: Int,
+    percGain: Float,
+    harmGain: Float,
+    active: Boolean,
+) {
+    val context = LocalContext.current
     val transition = rememberInfiniteTransition(label = "bg")
-    val t by transition.animateFloat(
+    val drift by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(9000), RepeatMode.Reverse),
         label = "drift",
     )
+    // 三段高光在背景里持续流动的两个相位（线性、无缝循环，周期不同→各团轨迹不同步）。
+    val phaseA by transition.animateFloat(
+        0f, 1f, infiniteRepeatable(tween(17000, easing = LinearEasing), RepeatMode.Restart), label = "pa",
+    )
+    val phaseB by transition.animateFloat(
+        0f, 1f, infiniteRepeatable(tween(23000, easing = LinearEasing), RepeatMode.Restart), label = "pb",
+    )
     // 换歌时封面取色变化做渐变过渡，避免背景颜色硬切。
     val background by animateColorAsState(colors.background, tween(900, easing = FastOutSlowInEasing), label = "bg0")
     val backgroundEnd by animateColorAsState(colors.backgroundEnd, tween(900, easing = FastOutSlowInEasing), label = "bg1")
     val highlight by animateColorAsState(colors.highlight, tween(900, easing = FastOutSlowInEasing), label = "hi")
-    Canvas(Modifier.fillMaxSize()) {
-        drawRect(Brush.verticalGradient(listOf(background, backgroundEnd)))
-        drawRect(
-            Brush.radialGradient(
-                colors = listOf(highlight.copy(alpha = 0.20f), Color.Transparent),
-                center = Offset(size.width * (0.2f + 0.6f * t), size.height * (0.8f - 0.6f * t)),
-                radius = size.maxDimension * 0.7f,
-            )
-        )
+    // 两团高光取色（只在换歌即颜色变化时重算）：两个不同色相的亮色。
+    val glowColors = remember(colors) { assignGlowColors(colors.highlightGradient, colors.highlight) }
+
+    // active 期间持有 root 内录（audio policy loopback，能拿到 offload 音乐、不静音、无投影提示）；离开/切回默认即停。
+    // 暂停/无声时内录读到的就是静音 → 柱子自然归零，无需额外按播放态启停。
+    DisposableEffect(active) {
+        if (active) AudioVisualizer.startCapture(context)
+        onDispose { if (active) AudioVisualizer.stopCapture(context) }
     }
+
+    // 平滑后的频段(声谱用) + HPSS 三团(律动用)；frame 每帧自增驱动 Canvas 重绘。
+    val bands = remember { FloatArray(AudioVisualizer.BAND_COUNT) }
+    val grp = remember { FloatArray(2) }
+    var frame by remember { mutableIntStateOf(0) }
+    // 回落系数随配置实时变化（不重启帧循环）：起拍固定即时跟手，只有回落用它控制平滑快慢。
+    val decayFactor = rememberUpdatedState(decayFactorOf(decay))
+    LaunchedEffect(active) {
+        if (!active) {
+            bands.fill(0f)
+            grp.fill(0f)
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos {
+                val fall = decayFactor.value
+                val raw = AudioVisualizer.bands
+                for (i in bands.indices) {
+                    val t = raw.getOrElse(i) { 0f }
+                    bands[i] += (t - bands[i]) * (if (t > bands[i]) ATTACK_BANDS else fall)
+                }
+                val rg = AudioVisualizer.groups
+                for (i in grp.indices) {
+                    val t = rg.getOrElse(i) { 0f }
+                    grp[i] += (t - grp[i]) * (if (t > grp[i]) ATTACK_BANDS else fall)
+                }
+                frame++
+            }
+        }
+    }
+
+    // 强度增益：0..100 映射约 0.6..2.4，越大波动越夸张。
+    val gain = 0.6f + (intensity / 100f).coerceIn(0f, 1f) * 1.8f
+
+    Canvas(Modifier.fillMaxSize()) {
+        @Suppress("UNUSED_EXPRESSION") frame // 每帧重绘触发（同时重读 bands 数组）
+        drawRect(Brush.verticalGradient(listOf(background, backgroundEnd)))
+
+        when (mode) {
+            RearBackground.DEFAULT -> drawDriftHighlight(highlight, 0.20f, drift)
+
+            RearBackground.SPECTRUM -> {
+                drawDriftHighlight(highlight, 0.20f, drift)
+                drawSpectrum(bands, gain, highlight, colors.highlightGradient, spectrumHeight / 100f)
+            }
+
+            RearBackground.PULSE -> {
+                // 两团高光由 HPSS（谐波-打击分离）驱动，各取封面一色（不同色，不分深浅）、随能量明暗、在背景里流动：
+                //  · 动次打次(打击分量) → 大团（像第一版那么大）
+                //  · 人声/其它(谐波分量) → 正常大小
+                val percE = (grp[0] * gain * percGain).coerceIn(0f, 1f)
+                val harmE = (grp[1] * gain * harmGain).coerceIn(0f, 1f)
+                val a = phaseA * (2f * PI.toFloat())
+                val b = phaseB * (2f * PI.toFloat())
+                drawBandGlow(glowColors[0], percE, 0.46f + 0.22f * cos(a), 0.58f + 0.16f * sin(b), 0.50f, 0.32f)        // 动次打次:大团
+                drawBandGlow(glowColors[1], harmE, 0.60f + 0.24f * cos(b + 2.5f), 0.34f + 0.16f * sin(a + 1.5f), 0.20f, 0.26f) // 人声/其它:正常
+            }
+        }
+    }
+}
+
+/** 缓慢游走的单团高光（默认/声谱底色用）。 */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDriftHighlight(color: Color, alpha: Float, drift: Float) {
+    drawRect(
+        Brush.radialGradient(
+            colors = listOf(color.copy(alpha = alpha), Color.Transparent),
+            center = Offset(size.width * (0.2f + 0.6f * drift), size.height * (0.8f - 0.6f * drift)),
+            radius = size.maxDimension * 0.7f,
+        )
+    )
+}
+
+/**
+ * 单个频段高光团：[energy] 控制亮度/半径，[cxFrac]/[cyFrac] 为当前流动中心（屏幕比例）；
+ * 半径 = 屏幕最大边 × ([baseR] + e×[gainR])，由调用方按团大小指定（动次大团 / 谐波正常）。
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBandGlow(
+    color: Color,
+    energy: Float,
+    cxFrac: Float,
+    cyFrac: Float,
+    baseR: Float,
+    gainR: Float,
+) {
+    val e = energy.coerceIn(0f, 1f)
+    val alpha = 0.07f + e * 0.55f
+    drawRect(
+        Brush.radialGradient(
+            colors = listOf(color.copy(alpha = alpha), Color.Transparent),
+            center = Offset(size.width * cxFrac, size.height * cyFrac),
+            radius = size.maxDimension * (baseR + e * gainR),
+        )
+    )
+}
+
+/**
+ * 两团高光配色：从封面渐变色挑 **2 个色相不同**的色（动次打次 / 人声其它），不分深浅、只求不同。
+ * 候选不足时用主色相 +150° 补足。每色略提亮以适合做发光团。
+ */
+private fun assignGlowColors(gradient: List<Color>, highlight: Color): List<Color> {
+    fun hsvOf(c: Color): FloatArray {
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(c.toArgb(), hsv)
+        return hsv
+    }
+    // 候选：有一定亮度，按"亮且饱和"排序优先。
+    val brights = gradient
+        .filter { hsvOf(it)[2] >= 0.22f }
+        .sortedByDescending { hsvOf(it).let { h -> h[2] * (0.5f + h[1]) } }
+    val picked = ArrayList<Color>(2)
+    for (c in brights) {
+        val hue = hsvOf(c)[0]
+        if (picked.none { hueDistance(hsvOf(it)[0], hue) < 30f }) picked.add(c)
+        if (picked.size == 2) break
+    }
+    if (picked.isEmpty()) picked.add(highlight)
+    if (picked.size < 2) {
+        val bh = hsvOf(picked[0])
+        picked.add(Color(android.graphics.Color.HSVToColor(floatArrayOf((bh[0] + 150f) % 360f, max(0.6f, bh[1]), max(0.7f, bh[2])))))
+    }
+    return picked.map { it.lighten(0.1f) }
+}
+
+/** 两个色相（0..360）的环形最小夹角。 */
+private fun hueDistance(a: Float, b: Float): Float {
+    val d = abs(a - b) % 360f
+    return if (d > 180f) 360f - d else d
+}
+
+/** 起拍平滑系数（固定、即时跟手）：频段上行时向目标快速逼近，保证律动/频谱跟得上节拍。 */
+private const val ATTACK_BANDS = 0.55f
+
+/** 歌词发光/控件律动专用的攻击系数（比 [ATTACK_BANDS] 更柔和，回落仍用用户配置的 [RhythmDecay]；
+ * 避免缩放/发光半径逐帧跟着原始能量的高频抖动而"颤"）。 */
+private const val UI_RHYTHM_ATTACK = 0.16f
+
+/** 律动恢复速度→每帧回落系数（越小回落越慢越柔和）。极快→极慢五档。 */
+private fun decayFactorOf(decay: RhythmDecay): Float = when (decay) {
+    RhythmDecay.VERY_FAST -> 0.5f
+    RhythmDecay.FAST -> 0.3f
+    RhythmDecay.MEDIUM -> 0.16f
+    RhythmDecay.SLOW -> 0.085f
+    RhythmDecay.VERY_SLOW -> 0.04f
+}
+
+/**
+ * 控件/歌词律动专用的回落系数：同名五档整体比 [decayFactorOf] 慢两级（"中"=背景的"极慢"），
+ * 用户反馈背景那套"极慢"给歌词/控件用还是不够慢。继续按大致减半的节奏往下延伸两档。
+ */
+private fun uiDecayFactorOf(decay: RhythmDecay): Float = when (decay) {
+    RhythmDecay.VERY_FAST -> 0.16f
+    RhythmDecay.FAST -> 0.085f
+    RhythmDecay.MEDIUM -> 0.04f
+    RhythmDecay.SLOW -> 0.02f
+    RhythmDecay.VERY_SLOW -> 0.01f
+}
+
+/**
+ * 底部频谱柱（背景装饰，画在最底层=歌词后面）：从屏幕**横向中心向左右两侧镜像**展开，
+ * 低频在中央、高频向两侧；从底向上、半透明，柱色沿封面渐变色取（中心→边缘）。
+ * 高度不设固定上限，由 [heightScale]（=声谱高度%/100）缩放，封顶屏幕高度。
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSpectrum(
+    bands: FloatArray,
+    gain: Float,
+    highlight: Color,
+    gradient: List<Color>,
+    heightScale: Float,
+) {
+    val n = bands.size
+    if (n == 0) return
+    val w = size.width
+    val h = size.height
+    val centerX = w / 2f
+    val slot = (w / 2f) / n        // 每侧 n 条
+    val barW = slot * 0.52f        // 比上一版略粗一点点
+    val cr = CornerRadius(barW / 2f, barW / 2f)
+    for (i in 0 until n) {
+        val v = (bands[i] * gain).coerceIn(0f, 1f)
+        // 不限高：柱高=能量×屏高×缩放，最高到满屏。
+        val barH = (v * h * heightScale).coerceAtMost(h)
+        if (barH < 1.5f) continue
+        val color = gradientColorAt(gradient, highlight, if (n == 1) 0f else i.toFloat() / (n - 1))
+            .copy(alpha = 0.20f + v * 0.28f)
+        val inset = (slot - barW) / 2f
+        // 中心向右第 i 条 + 镜像到左侧，关于中心对称。
+        drawRoundRect(color, Offset(centerX + i * slot + inset, h - barH), Size(barW, barH), cr)
+        drawRoundRect(color, Offset(centerX - (i + 1) * slot + inset, h - barH), Size(barW, barH), cr)
+    }
+}
+
+/** 沿渐变色组取 [t]∈0..1 处颜色；空组回退 [fallback]。 */
+private fun gradientColorAt(colors: List<Color>, fallback: Color, t: Float): Color {
+    if (colors.isEmpty()) return fallback
+    if (colors.size == 1) return colors[0]
+    val scaled = t.coerceIn(0f, 1f) * (colors.size - 1)
+    val idx = scaled.toInt().coerceIn(0, colors.size - 2)
+    return lerp(colors[idx], colors[idx + 1], scaled - idx)
 }
 
 /**

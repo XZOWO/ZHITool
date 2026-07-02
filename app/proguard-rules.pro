@@ -7,6 +7,9 @@
 -keep class com.zhitool.rearlyric.rear.RearLyricActivity { *; }
 -keep class com.zhitool.rearlyric.lyric.LyricService { *; }
 
+# Root 直采助手：经 app_process 按类名+main 反射启动，禁止改名/裁剪
+-keep class com.zhitool.rearlyric.tools.audio.RootAudioCapture { *; }
+
 # libxposed-api / libxposed-service
 -adaptresourcefilecontents META-INF/xposed/java_init.list
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {

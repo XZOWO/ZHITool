@@ -88,18 +88,47 @@ private const val BASE_DIM_ALPHA = 116f
 /** 未唱文字下沉量（相对字号）与唱到时回正动画的最长时长。 */
 private const val SINK_EM = 0.075f
 private const val LIFT_MS = 320L
-/** 副歌词渐显/收起动画时长、字号比例、与主歌词间距、透明度、整块缩小量。 */
-private const val REVEAL_MS = 600f
+/** 副歌词字号比例、与主歌词间距、透明度（顶入/收起时长见 [SEC_GAP_OPEN_MS]/[SEC_APPEAR_MS]）。 */
 private const val SEC_EM = 0.66f
 private const val SEC_GAP_EM = 0.18f
 private const val SEC_ALPHA = 0.75f
 /** 副歌词渐变进度的基色/高亮透明度。 */
 private const val SEC_BASE_ALPHA = 110f
 private const val SEC_HI_ALPHA = 235f
-private const val BLOCK_SHRINK = 0.06f
+/** 副句顶入的撑开分摊：主句及其上方句让出 0.9、下方句让出 0.1（其余 = 1-此值）。 */
+private const val SEC_UP_SHARE = 0.9f
+/**
+ * 副句流程分两段（有副句时主句上移更快、到位后再出副句）：
+ * 段一 = 主句上移 + 腾出空隙，与切句滚动**同起点、同时长、同缓动(easeOutCubic)** → 合成为一次
+ *        干净的整体上移（所有主句一起动、保距离；因多走了 0.9·副句高的距离而比无副句时更快）；
+ * 段二 = 空隙就位后副句才「从上往下」缩放渐显（见 [SEC_APPEAR_MS]）。
+ * 此为段一时长，沿用切句滚动时长以严格同拍。
+ */
+private const val SEC_GAP_OPEN_MS = SCROLL_DURATION_MS
+/**
+ * 副句「出现/消失」动画时长与起始缩放：以对齐侧顶角为锚（居左=左上、居右=右上、居中=顶边中心）做
+ * **字体等比放大**（非折叠），配合透明度。出现 = 字体从 [SEC_APPEAR_SCALE_FROM] 非线性(easeOutCubic)
+ * 放大到 1 + 渐显；消失（切句收起）= 反向等比缩小到 [SEC_APPEAR_SCALE_FROM] + 渐隐（同样非线性）。
+ * 出现时机：翻译/罗马音在主句上移过半即出、和声（带逐字时间）在主句到位后再出（见 [drawLineBlock]）。
+ */
+private const val SEC_APPEAR_MS = 380f
+private const val SEC_APPEAR_SCALE_FROM = 0.5f
 /** 当前演唱句放大突出倍率与放大/缩小动画时长（墙钟，非线性 easeOut）。仅全量歌词。 */
 private const val CURRENT_ZOOM = 0.03f
 private const val ZOOM_MS = 300f
+/**
+ * 歌词发光（随音乐律动，独立通道，不叠加到 [CURRENT_ZOOM] 的放大缩小上——只加光晕，
+ * 避免和已调好的演唱放大动画打架）：当前/抢唱句已唱部分的最大模糊半径（相对字号）。
+ */
+private const val AUDIO_GLOW_MAX_EM = 0.22f
+/** 封面贴图随音乐律动"原地呼吸"的最大额外缩放（只画在贴图本身，不影响封面尺寸/位置/相邻文字排版）。 */
+private const val AUDIO_COVER_PULSE = 0.10f
+/** 歌词整层（所有可见句一起）随音乐律动的最大额外缩放，与 [CURRENT_ZOOM] 各自独立叠加。 */
+private const val AUDIO_LYRIC_PULSE = 0.07f
+/** 高亮文字描边打底宽度（相对字号）与描边透明度上限（0..255）：增强对比度，比 shadow layer 更安全
+ * （不会触发"渐变 shader + setShadowLayer"在硬件加速下渲染成矩形色块的已知 Android 坑）。 */
+private const val TEXT_STROKE_WIDTH_EM = 0.045f
+private const val TEXT_STROKE_ALPHA_FRAC = 0.42f
 /** 副句"演唱前提前量"：带逐字时间的和声在自己开口前这么久才顶入显示。 */
 private const val SEC_LEAD_MS = 300L
 /** 圆点前歌名-作者名：字号比例 / 与歌词合计最多行数 / 呼吸动画幅度（弱）。 */
@@ -242,6 +271,14 @@ internal class FullLyricView @JvmOverloads constructor(
     /** 渐变高亮前沿羽化：在 saveLayer 内用 DST_IN 横向 alpha 渐变蒙版裁出软边。 */
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val dstInXfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+    /**
+     * 歌词律动整体缩放的离屏位图层：把整块歌词按 scale=1 画进位图（模糊 mask 位置稳定），
+     * 再把整张位图按脉动系数平滑缩放贴回主画布 —— 避免逐句在变化的 scale 下重栅格化导致的 1px 抖动。
+     * 仅在脉动明显（>1.0008）时启用，静音/无脉动时直接画（无额外开销）。
+     */
+    private var rhythmLayer: Bitmap? = null
+    private val rhythmLayerCanvas = Canvas()
+    private val rhythmLayerPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     /** 封面绘制（圆角/圆形裁剪 + 旋转）。 */
     private val coverPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
     private val coverClipPath = Path()
@@ -255,6 +292,43 @@ internal class FullLyricView @JvmOverloads constructor(
     private var playerPackage: String? = null
     private var coverBitmap: Bitmap? = null
     private var playing: Boolean = false
+
+    // ---- 三个独立律动开关（歌词发光 / 歌词律动 / 空间律动）+ 音频能量（已按用户增益换算，0..1） ----
+    private var lyricGlowEnabled = false
+    private var lyricRhythmEnabled = false
+    private var controlRhythmEnabled = false
+    /** 发光强度用（受"歌词发光强度"额外增益）。 */
+    private var glowPerc = 0f
+    private var glowHarm = 0f
+    /** 缩放/位移用（不受发光强度影响，且比发光更平滑——缩放对高频抖动比发光敏感得多，否则会看着"颤"）。 */
+    private var motionPerc = 0f
+    private var motionHarm = 0f
+
+    /**
+     * 每帧推送一次平滑后的音频能量（0..1）与三个律动开关：[glowP]/[glowH] 驱动歌词发光光晕，
+     * [moP]/[moH] 驱动缩放脉动（歌词律动/空间律动共用）；上游已分别按"发光强度"/"控件律动强度"
+     * 换算增益，这里只按各自开关做门控与范围收敛。三个开关分别管发光/歌词缩放/封面按钮缩放。
+     */
+    fun setAudioEnergy(
+        glowP: Float, glowH: Float, moP: Float, moH: Float,
+        glowOn: Boolean, lyricRhythmOn: Boolean, controlRhythmOn: Boolean,
+    ) {
+        lyricGlowEnabled = glowOn
+        lyricRhythmEnabled = lyricRhythmOn
+        controlRhythmEnabled = controlRhythmOn
+        glowPerc = if (glowOn) glowP.coerceIn(0f, 1f) else 0f
+        glowHarm = if (glowOn) glowH.coerceIn(0f, 1f) else 0f
+        // motion 能量供歌词律动/空间律动共用；只要两者有一个开就保留，供各自门控取用。
+        val motionOn = lyricRhythmOn || controlRhythmOn
+        motionPerc = if (motionOn) moP.coerceIn(0f, 1f) else 0f
+        motionHarm = if (motionOn) moH.coerceIn(0f, 1f) else 0f
+    }
+
+    /** 当前句发光用的混合能量（低音为主、非低音为辅）。 */
+    private fun rhythmGlow(): Float = (glowPerc * 0.7f + glowHarm * 0.3f).coerceIn(0f, 1f)
+
+    /** 缩放/位移用的混合能量（低音为主、非低音为辅），供歌词整体律动与封面/按钮空间律动共用。 */
+    private fun rhythmMotion(): Float = (motionPerc * 0.7f + motionHarm * 0.3f).coerceIn(0f, 1f)
 
     /** 引导卡歌名/歌手布局（首句前展示）。 */
     private var introNameLayout: StaticLayout? = null
@@ -597,6 +671,8 @@ internal class FullLyricView @JvmOverloads constructor(
         handler.removeCallbacks(relockRunnable)
         handler.removeCallbacks(coverSingleTapRunnable)
         recycleVelocity()
+        rhythmLayer?.recycle()
+        rhythmLayer = null
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -697,48 +773,29 @@ internal class FullLyricView @JvmOverloads constructor(
             height / 2f
         }
         val fadeRange = FADE_SLOTS * (textSizePx * 1.2f + lineGapPx)
-
-        canvas.save()
-        // 仅横向裁到内容区（避开右侧挖孔/边缘），纵向放开到整屏，歌词可自然滑出上下屏幕外。
-        canvas.clipRect(
-            paddingLeft.toFloat(),
-            0f,
-            (width - paddingRight).toFloat(),
-            height.toFloat(),
-        )
-        canvas.translate(paddingLeft.toFloat(), viewCenter - scroll)
-
-        // 控制面板展开：全量滚动歌词不消失，淡到背景亮度（最早方案：歌词放背景），封面/进度条/按键叠其上。
         val lyricFade = 1f - 0.62f * panelProgress
-        if (lyricFade > 0.01f) {
-            // 绘制窗口以「当前可见滚动位置」为中心，并覆盖 currentIndex。长距离 seek/拖动时滚动动画
-            // 途经的中间句若不在 currentIndex±半径内会整屏空白——这里按可见位置取窗口即可修复。
-            val visualCenter = nearestIndexTo(scroll, now)
-            val anchor = if (currentIndex in models.indices) currentIndex else visualCenter
-            val first = (min(visualCenter, anchor) - DRAW_RADIUS).coerceAtLeast(0)
-            val last = (max(visualCenter, anchor) + DRAW_RADIUS).coerceAtMost(models.lastIndex)
-            for (i in first..last) {
-                val top = topOf(i, now)
-                val blockHeight = blockHeightOf(i, now)
-                val norm = abs(top + blockHeight / 2f - scroll) / fadeRange
-                // 当前句与抢唱副句都在演唱：全强度、不渐隐模糊、始终绘制（超长句句内滚动时块心可能远离 scroll）。
-                val isActive = i == currentIndex || i == overlapIndex
-                if (!isActive && norm >= 1f) continue
-                val alphaF = (if (isActive) 1f else (1f - norm).pow(FADE_EXPONENT)) * lyricFade
-                val blur = if (isActive) null else blurFor(norm)
-                drawLineBlock(canvas, i, top, blockHeight, alphaF, blur, revealFactorAt(i, now), norm, lineScale(i, now))
-            }
-        }
-        paint.maskFilter = null
-        secPaint.maskFilter = null
-
-        // 有封面时首句前用"封面+歌名+歌手"引导卡（首句出来后缩到角落带时间）；
-        // 无封面/不显示封面时回退到旧的"歌名-歌手 + 圆点"文字引导。
         val coverWidgetEnabled = coverBitmap != null && config.cover != CoverPosition.NONE
-        if (!coverWidgetEnabled) {
-            drawIntro(canvas)
+
+        // 歌词律动整体缩放：整块歌词随节奏放大/缩小（当前句锚定屏幕中线不动，其余句随之上下平移=呼吸）。
+        // 关键：**整块渲染到离屏位图再整体平滑缩放**，而不是逐句在变化的 scale 下重画——后者会让
+        // 每句每帧各自重栅格化模糊 mask，出现"某行莫名跳 1px"。位图缩放是平滑双线性，无逐句抖动。
+        val pulse = if (lyricRhythmEnabled) 1f + AUDIO_LYRIC_PULSE * rhythmMotion() else 1f
+        val layer = if (pulse > 1.0008f) ensureRhythmLayer() else null
+        if (layer != null) {
+            rhythmLayerCanvas.setBitmap(layer)
+            layer.eraseColor(Color.TRANSPARENT)
+            drawScrollingLyrics(rhythmLayerCanvas, now, scroll, viewCenter, fadeRange, lyricFade, coverWidgetEnabled)
+            rhythmLayerCanvas.setBitmap(null)
+            canvas.save()
+            // 不做安全区裁剪：围绕"内容水平中心 + 当前句所在的屏幕中线"缩放，放大部分允许溢出内边距
+            // （仅受视图边界约束），不再被安全区截断。
+            val pivotX = paddingLeft + (width - paddingLeft - paddingRight) / 2f
+            canvas.scale(pulse, pulse, pivotX, viewCenter)
+            canvas.drawBitmap(layer, 0f, 0f, rhythmLayerPaint)
+            canvas.restore()
+        } else {
+            drawScrollingLyrics(canvas, now, scroll, viewCenter, fadeRange, lyricFade, coverWidgetEnabled)
         }
-        canvas.restore()
 
         if (coverWidgetEnabled) {
             drawCoverWidget(canvas, now)
@@ -747,8 +804,9 @@ internal class FullLyricView @JvmOverloads constructor(
         // 长按蓄力/解锁动画：上报锁视觉参数给 Compose（画在左侧歌词时间处，本 view 画不到左 1/3）。
         reportLockVisual(now)
 
-        val revealAnimating = (revealIndex >= 0 && now - revealStartedAt < REVEAL_MS) ||
-            (collapseIndex >= 0 && now - collapseStartedAt < REVEAL_MS)
+        // 副句出现分两段（空隙 + 渐显），总时长 = SEC_GAP_OPEN_MS + SEC_APPEAR_MS，需持续重绘到段二结束。
+        val revealAnimating = (revealIndex >= 0 && now - revealStartedAt < SEC_GAP_OPEN_MS + SEC_APPEAR_MS) ||
+            (collapseIndex >= 0 && now - collapseStartedAt < SEC_GAP_OPEN_MS)
         val zoomAnimating = now - zoomStartedAt < ZOOM_MS.toLong()
         val lockBusy = pressArmAt != 0L ||
             (lockAnimAt != 0L && now - lockAnimAt < LOCK_ANIM_MS.toLong()) ||
@@ -767,11 +825,72 @@ internal class FullLyricView @JvmOverloads constructor(
                 // 单击封面的"双击打开控制页"提示淡入淡出期间持续重绘。
                 (coverHintAt != 0L && now - coverHintAt < COVER_HINT_MS.toLong())
         )
+        // 律动开启且在播放：能量逐帧变化，需持续自驱重绘（不完全依赖 Compose 每帧 bind，
+        // 帧交付更稳，减少发光/缩放的"卡顿感"）。暂停/静音时能量归零后不再排帧，不空耗电。
+        val rhythmAnimating = playing && (lyricGlowEnabled || lyricRhythmEnabled || controlRhythmEnabled)
         if (scrollAnimating || revealAnimating || zoomAnimating || overlapIndex >= 0 || coverAnimating || lockBusy ||
-            coverTransitionActive(now)
+            coverTransitionActive(now) || rhythmAnimating
         ) {
             postInvalidateOnAnimation()
         }
+    }
+
+    /**
+     * 滚动歌词层（不含封面/角标）：横向裁到内容区、纵向放开，平移到当前滚动位置后按窗口逐句绘制，
+     * 末尾画首句前引导（无封面时）。抽成方法供直接绘制与离屏位图两条路径共用。
+     */
+    private fun drawScrollingLyrics(
+        canvas: Canvas,
+        now: Long,
+        scroll: Float,
+        viewCenter: Float,
+        fadeRange: Float,
+        lyricFade: Float,
+        coverWidgetEnabled: Boolean,
+    ) {
+        canvas.save()
+        // 不做安全区横向裁剪：安全区（挖孔/摄像头）只是参考标志，不应真的截断歌词 UI——放大/呼吸时
+        // 允许歌词自由溢出内边距，仅受视图自身边界约束。纵向同样放开，歌词可自然滑出上下屏幕外。
+        canvas.translate(paddingLeft.toFloat(), viewCenter - scroll)
+        if (lyricFade > 0.01f) {
+            // 绘制窗口以「当前可见滚动位置」为中心，并覆盖 currentIndex。长距离 seek/拖动时滚动动画
+            // 途经的中间句若不在 currentIndex±半径内会整屏空白——这里按可见位置取窗口即可修复。
+            val visualCenter = nearestIndexTo(scroll, now)
+            val anchor = if (currentIndex in models.indices) currentIndex else visualCenter
+            val first = (min(visualCenter, anchor) - DRAW_RADIUS).coerceAtLeast(0)
+            val last = (max(visualCenter, anchor) + DRAW_RADIUS).coerceAtMost(models.lastIndex)
+            for (i in first..last) {
+                val top = topOf(i, now)
+                val blockHeight = blockHeightOf(i, now)
+                val norm = abs(top + blockHeight / 2f - scroll) / fadeRange
+                // 当前句与抢唱副句都在演唱：全强度、不渐隐模糊、始终绘制（超长句句内滚动时块心可能远离 scroll）。
+                val isActive = i == currentIndex || i == overlapIndex
+                if (!isActive && norm >= 1f) continue
+                val alphaF = (if (isActive) 1f else (1f - norm).pow(FADE_EXPONENT)) * lyricFade
+                val blur = if (isActive) null else blurFor(norm)
+                drawLineBlock(canvas, i, now, top, blockHeight, alphaF, blur, revealFactorAt(i, now), norm, lineScale(i, now))
+            }
+        }
+        paint.maskFilter = null
+        secPaint.maskFilter = null
+        // 无封面/不显示封面时回退到旧的"歌名-歌手 + 圆点"文字引导（有封面时引导卡由 drawCoverWidget 画）。
+        if (!coverWidgetEnabled) {
+            drawIntro(canvas)
+        }
+        canvas.restore()
+    }
+
+    /** 惰性创建/复用歌词律动离屏位图（尺寸随视图；创建失败则回退直接绘制）。 */
+    private fun ensureRhythmLayer(): Bitmap? {
+        if (width <= 0 || height <= 0) return null
+        val existing = rhythmLayer
+        if (existing != null && !existing.isRecycled && existing.width == width && existing.height == height) {
+            return existing
+        }
+        existing?.recycle()
+        val created = runCatching { Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) }.getOrNull()
+        rhythmLayer = created
+        return created
     }
 
     // ---- SuperLyric 单句渲染 ----
@@ -986,14 +1105,15 @@ internal class FullLyricView @JvmOverloads constructor(
                     canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
                     val dur = (tok.end - tok.begin).coerceAtLeast(1L)
                     val f = ((effPos - tok.begin).toFloat() / dur).coerceIn(0f, 1f)
-                    val front = tok.x + tok.width * f
                     if (config.gradientProgress) {
+                        // 与 drawKaraokeTokens 同款修复：羽化带扫过距离=字宽+羽化宽，f=1 时整字已全不透明。
                         val soft = (tok.size * GRADIENT_SOFT_EM).coerceAtMost(tok.width)
+                        val bandLeft = tok.x - soft + (tok.width + soft) * f
                         canvas.saveLayer(tok.x, tok.rowTop + dy, tok.x + tok.width, tok.rowBottom + dy, null)
                         applyHighlight(slPaint, hiA * a)
                         canvas.drawText(tok.text, tok.x, tok.baseline + dy, slPaint)
                         maskPaint.shader = LinearGradient(
-                            front - soft, 0f, front, 0f,
+                            bandLeft, 0f, bandLeft + soft, 0f,
                             HIGHLIGHT_MASK_COLORS, null, Shader.TileMode.CLAMP,
                         )
                         maskPaint.xfermode = dstInXfermode
@@ -1002,6 +1122,7 @@ internal class FullLyricView @JvmOverloads constructor(
                         maskPaint.shader = null
                         canvas.restore()
                     } else {
+                        val front = tok.x + tok.width * f
                         canvas.save()
                         canvas.clipRect(tok.x, tok.rowTop + dy, front, tok.rowBottom + dy)
                         applyHighlight(slPaint, hiA * a)
@@ -1485,19 +1606,12 @@ internal class FullLyricView @JvmOverloads constructor(
         }
     }
 
-    /** 自带副句按"时机"武装显示：抢唱时不显示；带逐字时间的和声=首字开口前 [SEC_LEAD_MS] 才顶入。 */
+    /**
+     * 自带副句按"时机"武装显示：带逐字时间的和声=首字开口前 [SEC_LEAD_MS] 才顶入。副句只随**所属句自身
+     * 的演唱生命周期**显隐——该句仍是当前句（还没唱完）就一直显示，唱完切走时才随之收起（正常 collapse）；
+     * 不再因抢唱重叠而中途收起（之前那样会误判、且翻译会"闪一下"）。
+     */
     private fun armRevealIfDue(now: Long, snap: Boolean) {
-        if (overlapIndex >= 0) {
-            // 抢唱占副句位时不显示当前句自带副句；若已显示则收起。
-            if (revealIndex == currentIndex && revealIndex >= 0) {
-                collapseFrom = revealFactorAt(currentIndex, now)
-                collapseIndex = currentIndex
-                collapseStartedAt = now
-                revealIndex = -1
-            }
-            revealArmed = true
-            return
-        }
         if (revealArmed || currentIndex < 0) return
         val threshold = ownSecondaryThreshold(currentIndex)
         if (threshold == null) {
@@ -1507,7 +1621,8 @@ internal class FullLyricView @JvmOverloads constructor(
         if (positionMs >= threshold) {
             revealArmed = true
             revealIndex = currentIndex
-            revealStartedAt = if (snap) now - REVEAL_MS.toLong() else now
+            // snap（换歌/尺寸变化立即就位）：把两段（空隙 + 副句渐显）都置为已完成。
+            revealStartedAt = if (snap) now - (SEC_GAP_OPEN_MS + SEC_APPEAR_MS).toLong() else now
         }
     }
 
@@ -1521,7 +1636,11 @@ internal class FullLyricView @JvmOverloads constructor(
         }
     }
 
-    /** 行缩放：当前句 1→1+[CURRENT_ZOOM] 放大突出，离开的旧主句缩回 1；其余（含抢唱句）保持 1。 */
+    /**
+     * 行缩放：当前句 1→1+[CURRENT_ZOOM] 放大突出，离开的旧主句缩回 1；其余（含抢唱句）保持 1。
+     * 歌词律动脉动**不在这里逐句叠加**（那样每句每帧各自重栅格化模糊 mask，会出现"某行莫名跳 1px"），
+     * 改为在 [renderLyrics] 里把整块歌词渲染到一层离屏位图后整体缩放（位图平滑缩放，见该处）。
+     */
     private fun lineScale(i: Int, now: Long): Float {
         if (i == currentIndex) {
             val t = easeOutCubic(((now - zoomStartedAt) / ZOOM_MS).coerceIn(0f, 1f))
@@ -1536,19 +1655,25 @@ internal class FullLyricView @JvmOverloads constructor(
 
     private fun easeOutCubic(t: Float): Float = 1f - (1f - t).pow(3)
 
+    /**
+     * 副句「空隙」开合进度（0=无、1=满），仅驱动 [revealExtra]/[revealOffset] 的腾位移动，不驱动副句
+     * 本体的缩放/透明度（那是段二，见 [drawLineBlock]）。开合都用 easeOutCubic、时长 [SEC_GAP_OPEN_MS]，
+     * 与切句滚动同缓动同时长同起点 → 主句上移与腾空隙合成一次干净整体运动。
+     */
     private fun revealFactorAt(i: Int, now: Long): Float {
         if (i < 0) return 0f
         if (i == revealIndex) {
-            val t = ((now - revealStartedAt) / REVEAL_MS).coerceIn(0f, 1f)
-            return smoothstep(t)
+            val t = ((now - revealStartedAt) / SEC_GAP_OPEN_MS).coerceIn(0f, 1f)
+            return easeOutCubic(t)
         }
         if (i == collapseIndex) {
-            val t = ((now - collapseStartedAt) / REVEAL_MS).coerceIn(0f, 1f)
-            return collapseFrom * (1f - smoothstep(t))
+            val t = ((now - collapseStartedAt) / SEC_GAP_OPEN_MS).coerceIn(0f, 1f)
+            return collapseFrom * (1f - easeOutCubic(t))
         }
         return 0f
     }
 
+    /** 第 i 句副句当前撑开的总高度（随 reveal/collapse 进度 0→满）。 */
     private fun revealExtra(i: Int, now: Long): Float {
         val factor = revealFactorAt(i, now)
         if (factor <= 0f) return 0f
@@ -1556,12 +1681,27 @@ internal class FullLyricView @JvmOverloads constructor(
         return factor * (secGapPx + sec.height)
     }
 
-    private fun topOf(i: Int, now: Long): Float {
-        var top = baseTops[i]
-        if (revealIndex in 0 until i) top += revealExtra(revealIndex, now)
-        if (collapseIndex in 0 until i) top += revealExtra(collapseIndex, now)
-        return top
+    /**
+     * 第 i 行因各活跃副句（当前句 reveal + 上一句 collapse）产生的纵向位移：某副句源 s 撑开 ext →
+     * 「s 及其上方句」上移 [SEC_UP_SHARE]·ext、「s 下方句」下移 (1-[SEC_UP_SHARE])·ext。上下让出量
+     * 合计 = ext，正好容纳副句。位移**只走 per-line 偏移、不并入滚动**：切句滚动锚定主句 base 中心
+     * （见 [targetScrollFor]），故主句移到"应放位置"的时长恒等于无副句时，副句顶起是并行叠加的
+     * 独立动画，不会把切句带快；切句/收起时该偏移在前后帧连续，无跳变。
+     */
+    private fun revealOffset(i: Int, now: Long): Float {
+        var off = 0f
+        if (revealIndex >= 0) {
+            val ext = revealExtra(revealIndex, now)
+            off += if (i <= revealIndex) -SEC_UP_SHARE * ext else (1f - SEC_UP_SHARE) * ext
+        }
+        if (collapseIndex >= 0 && collapseIndex != revealIndex) {
+            val ext = revealExtra(collapseIndex, now)
+            off += if (i <= collapseIndex) -SEC_UP_SHARE * ext else (1f - SEC_UP_SHARE) * ext
+        }
+        return off
     }
+
+    private fun topOf(i: Int, now: Long): Float = baseTops[i] + revealOffset(i, now)
 
     private fun blockHeightOf(i: Int, now: Long): Float =
         models[i].mainHeight + revealExtra(i, now)
@@ -1578,9 +1718,11 @@ internal class FullLyricView @JvmOverloads constructor(
         // 其余按整块居中。
         if (index == currentIndex && model.rowCount > 1 && mainH > limit) {
             val offset = lerp(limit / 2f, mainH - limit / 2f, lineReadProgress(index))
-            return topOf(index, now) + offset
+            return baseTops[index] + offset
         }
-        return topOf(index, now) + blockHeightOf(index, now) / 2f
+        // 切句滚动锚定主句 base 中心（不含副句顶起位移）：主句移到该位置的时长恒等于无副句时，
+        // 不被副句 reveal 带快；副句撑开引起的上移/下移全部由 [revealOffset] 逐行叠加。
+        return baseTops[index] + mainH / 2f
     }
 
     /** 单句可在视图内占用的纵向上限（整屏，不受安全区限制）：超过则当前句改为句内滚动跟随进度。 */
@@ -1601,6 +1743,7 @@ internal class FullLyricView @JvmOverloads constructor(
     private fun drawLineBlock(
         canvas: Canvas,
         i: Int,
+        now: Long,
         top: Float,
         blockHeight: Float,
         alphaF: Float,
@@ -1613,9 +1756,9 @@ internal class FullLyricView @JvmOverloads constructor(
         val contentWidth = (width - paddingLeft - paddingRight).toFloat()
         canvas.save()
         canvas.translate(0f, top)
-        // 行缩放（当前句放大突出）叠加副句顶入时的整块缩小。居左/居右行锚定对应边：
-        // 居左锁左边往右放大、居右锁右边往左放大，不向两侧侵占；居中才以中心放大。
-        val blockScale = scale * (1f - BLOCK_SHRINK * reveal)
+        // 行缩放仅保留「当前句放大突出」；副句顶入不再让整块缩小（只把主句顶起来，见 targetScrollFor）。
+        // 居左/居右行锚定对应边：居左锁左边往右放大、居右锁右边往左放大，不向两侧侵占；居中才以中心放大。
+        val blockScale = scale
         if (blockScale != 1f) {
             val pivotX = when (lineAligns.getOrElse(i) { LineAlign.CENTER }) {
                 LineAlign.LEFT -> 0f
@@ -1634,7 +1777,10 @@ internal class FullLyricView @JvmOverloads constructor(
                 textPaint = paint,
                 baseAlpha = BASE_DIM_ALPHA * alphaF,
                 hiAlpha = 255f * alphaF,
-                sink = true,
+                sink = config.sinkAnimation,
+                glow = rhythmGlowFilter(i),
+                glowStrength = rhythmGlowStrength(i),
+                stroke = true,
             )
         } else if (i < currentIndex) {
             // 已唱完的句子：高亮色打底 + 叠加白色，越往上越白，到隐藏边缘恰好全白。
@@ -1654,10 +1800,42 @@ internal class FullLyricView @JvmOverloads constructor(
         if (reveal > 0f) {
             val sec = secEntries.getOrNull(i)
             if (sec != null) {
-                val f = alphaF * reveal
-                val secTop = model.mainHeight + secGapPx * reveal + (1f - reveal) * sec.height * 0.35f
+                // 副句固定紧贴主句下方（不再从下方滑入），以对齐侧顶角为锚做**字体等比放大**（非折叠）：
+                //   居左=左上、居右=右上、居中=顶边中心。
+                // 出现（当前句 = revealIndex）：字体从起始比例非线性(easeOutCubic)放大 + 渐显；出现时机——
+                //   翻译/罗马音（无逐字时间）主句上移过半即出，和声（有逐字时间）主句到位后再出。
+                // 消失（切句收起 = collapseIndex）：字体等比缩小 + 渐隐，是出现的反向（同样非线性）。
+                val secScale: Float
+                val secAlphaMul: Float
+                if (i == revealIndex) {
+                    // 段二起点：翻译/罗马音/和声统一在主句上移到 0.4 时出。
+                    val appearDelay = SEC_GAP_OPEN_MS * 0.4f
+                    val ap = easeOutCubic(
+                        (((now - revealStartedAt).toFloat() - appearDelay) / SEC_APPEAR_MS).coerceIn(0f, 1f)
+                    )
+                    secScale = SEC_APPEAR_SCALE_FROM + (1f - SEC_APPEAR_SCALE_FROM) * ap
+                    secAlphaMul = ap
+                } else {
+                    // reveal 为收起进度（collapseFrom→0、easeOutCubic 非线性）：字体等比缩小 + 渐隐。
+                    secScale = SEC_APPEAR_SCALE_FROM + (1f - SEC_APPEAR_SCALE_FROM) * reveal
+                    secAlphaMul = reveal
+                }
+                if (secAlphaMul <= 0f) {
+                    canvas.restore()
+                    return
+                }
+                val f = alphaF * secAlphaMul
+                val secTop = model.mainHeight + secGapPx
                 canvas.save()
                 canvas.translate(0f, secTop)
+                if (secScale != 1f) {
+                    val secPivotX = when (lineAligns.getOrElse(i) { LineAlign.CENTER }) {
+                        LineAlign.LEFT -> 0f
+                        LineAlign.RIGHT -> contentWidth
+                        LineAlign.CENTER -> contentWidth / 2f
+                    }
+                    canvas.scale(secScale, secScale, secPivotX, 0f)
+                }
                 secPaint.maskFilter = blur
                 if (sec.model != null) {
                     if (i == currentIndex) {
@@ -1723,7 +1901,14 @@ internal class FullLyricView @JvmOverloads constructor(
         textPaint.textSize = baseSize
     }
 
-    /** 渐变进度绘制：基色 + 高亮按词 clip 扫过；[sink] 时未唱文字下沉、唱到时回正。 */
+    /**
+     * 渐变进度绘制：基色 + 高亮按词 clip 扫过；[sink] 时未唱文字下沉、唱到时回正。
+     * [glow]（非 null）在**已点亮部分**叠一层随音乐律动变化的模糊光晕（BlurMaskFilter，画在描边+
+     * 填充之下；用 maskFilter 而非 shadow layer，不会触发"渐变 shader + setShadowLayer"在硬件
+     * 加速下渲染成矩形色块的坑）。发光跟随**相对进度**：整词唱完的 token 整体发光、正在唱的 token
+     * 只在扫过的那段发光（与高亮同一 clip/渐变区），故发光边界随逐字进度平滑推进，而非整词到点才
+     * 突然全亮。[stroke] 为 true 时高亮部分描边打底增强对比度（同样只用于已点亮部分）。
+     */
     private fun drawKaraokeTokens(
         canvas: Canvas,
         tokens: List<Token>,
@@ -1731,16 +1916,30 @@ internal class FullLyricView @JvmOverloads constructor(
         baseAlpha: Float,
         hiAlpha: Float,
         sink: Boolean,
+        glow: BlurMaskFilter? = null,
+        glowStrength: Float = 0f,
+        stroke: Boolean = false,
     ) {
         val baseSize = textPaint.textSize
+        // 发光层：固定半径 [glow]，[glowStrength]（0..1，随音乐能量）只调发光透明度→平滑不跳档。
+        val glowOn = glow != null && glowStrength > 0.01f
+        val glowAlpha = hiAlpha * glowStrength
+        // 发光模糊会向字形四周扩散；给 saveLayer/clip 上下留出等量余量，避免光晕被行盒裁成方块。
+        val glowPadV = if (glowOn) textSizePx * AUDIO_GLOW_MAX_EM else 0f
         for (tok in tokens) {
             textPaint.textSize = tok.size
             // 相对进度关闭：当前词到点即整体点亮（无词内平滑扫过）。
             val sung = positionMs >= tok.end || (!config.relativeProgress && positionMs > tok.begin)
             when {
                 sung -> {
+                    if (glowOn) {
+                        textPaint.maskFilter = glow
+                        applyHighlight(textPaint, glowAlpha)
+                        canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+                        textPaint.maskFilter = null
+                    }
                     applyHighlight(textPaint, hiAlpha)
-                    canvas.drawText(tok.text, tok.x, tok.baseline, textPaint)
+                    drawHighlightFill(canvas, tok.text, tok.x, tok.baseline, textPaint, stroke)
                 }
                 positionMs <= tok.begin -> {
                     textPaint.shader = null
@@ -1757,27 +1956,46 @@ internal class FullLyricView @JvmOverloads constructor(
                     canvas.drawText(tok.text, tok.x, tok.baseline + dy, textPaint)
                     val dur = (tok.end - tok.begin).coerceAtLeast(1L)
                     val f = ((positionMs - tok.begin).toFloat() / dur).coerceIn(0f, 1f)
-                    val front = tok.x + tok.width * f
                     if (config.gradientProgress) {
-                        // 渐变软边：整词画高亮后用横向 alpha 渐变（DST_IN）在前沿羽化。
+                        // 渐变软边：整词画高亮后用横向 alpha 渐变（DST_IN）在前沿羽化。羽化带随 f 从
+                        // "整词左侧之外"扫到"整词右侧之外"（总扫过距离 = 字宽+羽化宽），保证 f=1 时
+                        // 整字已经完全不透明——避免旧版 f=1 时字尾仍卡在羽化一半、下一帧切到 sung
+                        // 分支瞬间跳变成满色的硬切感。发光层画在高亮层之下、同在 DST_IN 蒙版内，
+                        // 故光晕只落在已扫过的那段，跟随相对进度推进。
                         val soft = (textSizePx * GRADIENT_SOFT_EM).coerceAtMost(tok.width)
-                        canvas.saveLayer(tok.x, tok.rowTop, tok.x + tok.width, tok.rowBottom + sinkPx, null)
+                        val bandLeft = tok.x - soft + (tok.width + soft) * f
+                        val layerTop = tok.rowTop - glowPadV
+                        val layerBottom = tok.rowBottom + sinkPx + glowPadV
+                        canvas.saveLayer(tok.x, layerTop, tok.x + tok.width, layerBottom, null)
+                        if (glowOn) {
+                            textPaint.maskFilter = glow
+                            applyHighlight(textPaint, glowAlpha)
+                            canvas.drawText(tok.text, tok.x, tok.baseline + dy, textPaint)
+                            textPaint.maskFilter = null
+                        }
                         applyHighlight(textPaint, hiAlpha)
-                        canvas.drawText(tok.text, tok.x, tok.baseline + dy, textPaint)
+                        drawHighlightFill(canvas, tok.text, tok.x, tok.baseline + dy, textPaint, stroke)
                         maskPaint.shader = LinearGradient(
-                            front - soft, 0f, front, 0f,
+                            bandLeft, 0f, bandLeft + soft, 0f,
                             HIGHLIGHT_MASK_COLORS, null, Shader.TileMode.CLAMP,
                         )
                         maskPaint.xfermode = dstInXfermode
-                        canvas.drawRect(tok.x, tok.rowTop, tok.x + tok.width, tok.rowBottom + sinkPx, maskPaint)
+                        canvas.drawRect(tok.x, layerTop, tok.x + tok.width, layerBottom, maskPaint)
                         maskPaint.xfermode = null
                         maskPaint.shader = null
                         canvas.restore()
                     } else {
+                        val front = tok.x + tok.width * f
                         canvas.save()
-                        canvas.clipRect(tok.x, tok.rowTop, front, tok.rowBottom + sinkPx)
+                        canvas.clipRect(tok.x, tok.rowTop - glowPadV, front, tok.rowBottom + sinkPx + glowPadV)
+                        if (glowOn) {
+                            textPaint.maskFilter = glow
+                            applyHighlight(textPaint, glowAlpha)
+                            canvas.drawText(tok.text, tok.x, tok.baseline + dy, textPaint)
+                            textPaint.maskFilter = null
+                        }
                         applyHighlight(textPaint, hiAlpha)
-                        canvas.drawText(tok.text, tok.x, tok.baseline + dy, textPaint)
+                        drawHighlightFill(canvas, tok.text, tok.x, tok.baseline + dy, textPaint, stroke)
                         canvas.restore()
                     }
                 }
@@ -1785,6 +2003,58 @@ internal class FullLyricView @JvmOverloads constructor(
         }
         textPaint.shader = null
         textPaint.textSize = baseSize
+    }
+
+    /**
+     * 高亮文字描边打底 + 填充（[stroke]=false 时就是普通填充）：描边用半透明黑色，宽度相对字号，
+     * 画在填充下方增强对比度——用 [Paint.Style.STROKE] 而非 setShadowLayer，故可以和 [applyHighlight]
+     * 设的渐变 shader 共存，不触发硬件加速已知的 shadow+shader 渲染 bug。
+     */
+    private fun drawHighlightFill(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        y: Float,
+        textPaint: TextPaint,
+        stroke: Boolean,
+    ) {
+        if (stroke) {
+            val savedStyle = textPaint.style
+            val savedColor = textPaint.color
+            val savedAlpha = textPaint.alpha
+            val savedShader = textPaint.shader
+            val savedWidth = textPaint.strokeWidth
+            textPaint.style = Paint.Style.STROKE
+            textPaint.strokeWidth = textPaint.textSize * TEXT_STROKE_WIDTH_EM
+            textPaint.shader = null
+            textPaint.color = Color.BLACK
+            textPaint.alpha = (savedAlpha * TEXT_STROKE_ALPHA_FRAC).roundToInt().coerceIn(0, 255)
+            canvas.drawText(text, x, y, textPaint)
+            textPaint.style = savedStyle
+            textPaint.color = savedColor
+            textPaint.alpha = savedAlpha
+            textPaint.shader = savedShader
+            textPaint.strokeWidth = savedWidth
+        }
+        canvas.drawText(text, x, y, textPaint)
+    }
+
+    /**
+     * 当前/抢唱句的节奏发光滤镜：**半径固定**（=最大发光半径），能量只调发光透明度（见
+     * [rhythmGlowStrength]）。之前让半径随能量变化会把半径量化成整数像素、逐帧跳档 → 发光"一卡一卡"；
+     * 改成定半径 + 变 alpha 后，透明度是连续的（256 级，肉眼看不出台阶），发光随音乐平滑明暗。
+     * 用负数 key 与 [blurFor] 的正数距离模糊半径共用 [blurCache] 不冲突。
+     */
+    private fun rhythmGlowFilter(i: Int): BlurMaskFilter? {
+        if (!lyricGlowEnabled || (i != currentIndex && i != overlapIndex)) return null
+        val radius = (textSizePx * AUDIO_GLOW_MAX_EM).roundToInt().coerceAtLeast(1)
+        return blurCache.getOrPut(-radius) { BlurMaskFilter(radius.toFloat(), BlurMaskFilter.Blur.NORMAL) }
+    }
+
+    /** 节奏发光的当前强度（0..1，= 平滑能量）：作为发光层 alpha 的乘子，随音乐连续变化。 */
+    private fun rhythmGlowStrength(i: Int): Float {
+        if (!lyricGlowEnabled || (i != currentIndex && i != overlapIndex)) return 0f
+        return rhythmGlow()
     }
 
     /** 未唱文字下沉，唱到时在词长（上限 320ms）内非线性回正。 */
@@ -1939,7 +2209,7 @@ internal class FullLyricView @JvmOverloads constructor(
             lastCoverDocked = false
             // 换歌封面过渡期间，居中封面也交给飞入/飞出层（底板快照亦不画），避免与切换动画重影。
             if (!drawingSnapshot && !coverTransitionActive(now)) {
-                drawCoverBitmap(canvas, bmp, coverCx, centerY, cover, rotationDeg)
+                drawCoverBreathing(canvas, bmp, coverCx, centerY, cover, rotationDeg)
             }
             drawIntroText(canvas, textLeft, centerY, 1f)
             val scaleAnimating = coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()
@@ -2027,7 +2297,7 @@ internal class FullLyricView @JvmOverloads constructor(
 
         // 换歌封面过渡期间，槽位上的封面图片交给飞入/飞出层；底板快照里也不画封面。
         if (!drawingSnapshot && !coverTransitionActive(now)) {
-            drawCoverBitmap(canvas, bmp, coverCx, coverCy, coverSize, rotationDeg)
+            drawCoverBreathing(canvas, bmp, coverCx, coverCy, coverSize, rotationDeg)
         }
 
         // 单击封面弹"双击打开控制页"提示：大封面画在圆点行、小封面画在时间处，几秒后自动淡出。
@@ -2573,12 +2843,24 @@ internal class FullLyricView @JvmOverloads constructor(
         canvas.drawCircle(cx + spacing, centerY, radius, dotPaint)
     }
 
-    /** 角落小封面缩放：from→target（1↔1.1）的 easeOut 插值。 */
+    /**
+     * 角落小封面缩放：from→target（1↔1.1）的 easeOut 插值。**不含**律动脉动——这个值同时用来算
+     * 封面尺寸/位置/命中区，以及封面旁歌名/时间文字的排版（[drawDockText]/[drawNoLyricCard]），
+     * 律动能量逐帧变化，混进这里会让文字跟着重新排版、和封面不同步地"抖"。律动脉动改在
+     * [coverBreathScale] 里，只包一层局部 canvas 缩放画在封面贴图本身上，不影响布局。
+     */
     private fun currentCoverScale(now: Long): Float {
-        if (coverScaleStartedAt == 0L) return coverScaleTarget
-        val t = ((now - coverScaleStartedAt) / DOCK_SCALE_MS).coerceIn(0f, 1f)
-        return lerp(coverScaleFrom, coverScaleTarget, easeOutCubic(t))
+        return if (coverScaleStartedAt == 0L) {
+            coverScaleTarget
+        } else {
+            val t = ((now - coverScaleStartedAt) / DOCK_SCALE_MS).coerceIn(0f, 1f)
+            lerp(coverScaleFrom, coverScaleTarget, easeOutCubic(t))
+        }
     }
+
+    /** 封面随律动"原地呼吸"的额外缩放（空间律动开关；只在绘制封面贴图时套一层局部 canvas.scale）。 */
+    private fun coverBreathScale(): Float =
+        if (controlRhythmEnabled) 1f + AUDIO_COVER_PULSE * rhythmMotion() else 1f
 
     /** 封面绘制：圆角(方形)/圆形裁剪 + 旋转，源图按短边居中裁成正方形。 */
     /** 换歌封面过渡是否进行中（飞出 / 飞入 / 等新封面加载）。 */
@@ -2630,6 +2912,22 @@ internal class FullLyricView @JvmOverloads constructor(
                 drawCoverBitmap(canvas, newCover, lastCoverCx, cy, size, rotationDeg)
             }
         }
+    }
+
+    /**
+     * 封面贴图绘制的入口：套一层律动"呼吸"局部缩放（围绕封面自身中心，不改变 cx/cy/size 这些
+     * 供命中区/相邻文字排版用的值），呼吸=1 时直接绘制不建 save/restore 层。
+     */
+    private fun drawCoverBreathing(canvas: Canvas, bmp: Bitmap, cx: Float, cy: Float, size: Float, rotationDeg: Float) {
+        val breath = coverBreathScale()
+        if (breath == 1f) {
+            drawCoverBitmap(canvas, bmp, cx, cy, size, rotationDeg)
+            return
+        }
+        canvas.save()
+        canvas.scale(breath, breath, cx, cy)
+        drawCoverBitmap(canvas, bmp, cx, cy, size, rotationDeg)
+        canvas.restore()
     }
 
     private fun drawCoverBitmap(canvas: Canvas, bmp: Bitmap, cx: Float, cy: Float, size: Float, rotationDeg: Float) {

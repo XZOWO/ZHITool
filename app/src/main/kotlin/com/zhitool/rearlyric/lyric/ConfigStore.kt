@@ -24,6 +24,7 @@ object ConfigStore {
     private const val K_RELATIVE_PROGRESS = "relative_progress"
     private const val K_RELATIVE_HIGHLIGHT = "relative_highlight"
     private const val K_SIMULATE_WORD = "simulate_word_timing"
+    private const val K_SINK_ANIMATION = "sink_animation"
     private const val K_LYRIC_ANIMATION = "lyric_animation"
     private const val K_SAFE_LEFT = "safe_area_left"
     private const val K_SAFE_RIGHT = "safe_area_right"
@@ -34,9 +35,25 @@ object ConfigStore {
     private const val K_TIME_LINE_LEN = "time_line_length"
     private const val K_BATTERY_MODE = "battery_mode"
     private const val K_CHARGE_WAVE = "charge_wave"
+    private const val K_BACKGROUND = "rear_background"
+    private const val K_RHYTHM_INTENSITY = "rhythm_intensity"
+    private const val K_RHYTHM_DECAY = "rhythm_decay"
+    private const val K_SPECTRUM_HEIGHT = "spectrum_height"
+    private const val K_GLOW_PERC = "glow_perc_gain"
+    private const val K_GLOW_HARM = "glow_harm_gain"
+    private const val K_LYRIC_GLOW = "lyric_glow"
+    private const val K_LYRIC_RHYTHM = "lyric_rhythm"
+    private const val K_CONTROL_RHYTHM = "control_rhythm"
+    private const val K_UI_RHYTHM_INTENSITY = "ui_rhythm_intensity"
+    private const val K_UI_RHYTHM_DECAY = "ui_rhythm_decay"
+    private const val K_LYRIC_GLOW_INTENSITY = "lyric_glow_intensity"
+    private const val K_GLOW_INTENSITY_V2 = "glow_intensity_v2"
     private const val K_CFG_VERSION = "config_version"
     /** 配置版本：升到 1 时一次性重定基（安全区/小锁/时间偏移归 0）+ 刷新绝对默认（字号 59/小锁 14/细线 32）。 */
     private const val CFG_VERSION = 1
+    private const val K_DEFAULTS_VERSION = "defaults_version"
+    /** 律动默认版本：升到 1 时把律动相关项一次性刷成新默认（背景=律动/强度20/回落慢/增益300/500）。 */
+    private const val DEFAULTS_VERSION = 1
     private const val K_ONLY_SELECTED = "only_selected"
     private const val K_SELECTED_APPS = "selected_apps"
     private const val K_PACKAGE_STYLES = "package_styles"
@@ -63,6 +80,7 @@ object ConfigStore {
                 relativeProgress = sp.getBoolean(K_RELATIVE_PROGRESS, true),
                 relativeHighlight = sp.getBoolean(K_RELATIVE_HIGHLIGHT, true),
                 simulateWordTiming = sp.getBoolean(K_SIMULATE_WORD, true),
+                sinkAnimation = sp.getBoolean(K_SINK_ANIMATION, true),
                 lyricAnimation = LyricAnimation.entries.getOrElse(sp.getInt(K_LYRIC_ANIMATION, LyricAnimation.RANDOM_RISE.ordinal)) { LyricAnimation.RANDOM_RISE },
                 safeAreaLeft = sp.getInt(K_SAFE_LEFT, 0),
                 safeAreaRight = sp.getInt(K_SAFE_RIGHT, 0),
@@ -73,6 +91,18 @@ object ConfigStore {
                 timeLineLength = sp.getInt(K_TIME_LINE_LEN, 32),
                 batteryMode = BatteryMode.entries.getOrElse(sp.getInt(K_BATTERY_MODE, BatteryMode.WHEN_CHARGING.ordinal)) { BatteryMode.WHEN_CHARGING },
                 chargeWave = sp.getBoolean(K_CHARGE_WAVE, true),
+                background = RearBackground.entries.getOrElse(sp.getInt(K_BACKGROUND, RearBackground.PULSE.ordinal)) { RearBackground.PULSE },
+                rhythmIntensity = sp.getInt(K_RHYTHM_INTENSITY, 20),
+                rhythmDecay = RhythmDecay.entries.getOrElse(sp.getInt(K_RHYTHM_DECAY, RhythmDecay.SLOW.ordinal)) { RhythmDecay.SLOW },
+                spectrumHeight = sp.getInt(K_SPECTRUM_HEIGHT, 60),
+                glowPercGain = sp.getInt(K_GLOW_PERC, 300),
+                glowHarmGain = sp.getInt(K_GLOW_HARM, 500),
+                lyricGlow = sp.getBoolean(K_LYRIC_GLOW, true),
+                lyricRhythm = sp.getBoolean(K_LYRIC_RHYTHM, true),
+                controlRhythm = sp.getBoolean(K_CONTROL_RHYTHM, true),
+                uiRhythmIntensity = sp.getInt(K_UI_RHYTHM_INTENSITY, 20),
+                uiRhythmDecay = RhythmDecay.entries.getOrElse(sp.getInt(K_UI_RHYTHM_DECAY, RhythmDecay.SLOW.ordinal)) { RhythmDecay.SLOW },
+                lyricGlowIntensity = sp.getInt(K_LYRIC_GLOW_INTENSITY, 300),
             )
         )
         AppFilterState.update(
@@ -99,6 +129,38 @@ object ConfigStore {
                 savePackageStyles(context, PackageStyleState.current.mapValues { (_, s) -> s.copy(config = recenter(s.config)) })
             }
             context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putInt(K_CFG_VERSION, CFG_VERSION).apply()
+        }
+
+        // 一次性把律动相关项刷成新默认（用户指定：律动背景/强度20/回落慢/低音300/非低音500）。
+        if (sp.getInt(K_DEFAULTS_VERSION, 0) < DEFAULTS_VERSION) {
+            save(
+                context,
+                RearConfigState.current.copy(
+                    background = RearBackground.PULSE,
+                    rhythmIntensity = 20,
+                    rhythmDecay = RhythmDecay.SLOW,
+                    glowPercGain = 300,
+                    glowHarmGain = 500,
+                ),
+            )
+            context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putInt(K_DEFAULTS_VERSION, DEFAULTS_VERSION).apply()
+        }
+
+        // 一次性把"歌词发光强度"默认由 100 提到 300：只在用户从未改过（仍是旧默认 100）时提升，
+        // 尊重已自定义的值；不影响其它律动设置。
+        if (!sp.getBoolean(K_GLOW_INTENSITY_V2, false)) {
+            if (RearConfigState.current.lyricGlowIntensity == 100) {
+                save(context, RearConfigState.current.copy(lyricGlowIntensity = 300))
+            }
+            if (PackageStyleState.current.isNotEmpty()) {
+                savePackageStyles(
+                    context,
+                    PackageStyleState.current.mapValues { (_, s) ->
+                        if (s.config.lyricGlowIntensity == 100) s.copy(config = s.config.copy(lyricGlowIntensity = 300)) else s
+                    },
+                )
+            }
+            context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putBoolean(K_GLOW_INTENSITY_V2, true).apply()
         }
     }
 
@@ -141,6 +203,7 @@ object ConfigStore {
             putBoolean(K_RELATIVE_PROGRESS, cfg.relativeProgress)
             putBoolean(K_RELATIVE_HIGHLIGHT, cfg.relativeHighlight)
             putBoolean(K_SIMULATE_WORD, cfg.simulateWordTiming)
+            putBoolean(K_SINK_ANIMATION, cfg.sinkAnimation)
             putInt(K_LYRIC_ANIMATION, cfg.lyricAnimation.ordinal)
             putInt(K_SAFE_LEFT, cfg.safeAreaLeft)
             putInt(K_SAFE_RIGHT, cfg.safeAreaRight)
@@ -151,6 +214,18 @@ object ConfigStore {
             putInt(K_TIME_LINE_LEN, cfg.timeLineLength)
             putInt(K_BATTERY_MODE, cfg.batteryMode.ordinal)
             putBoolean(K_CHARGE_WAVE, cfg.chargeWave)
+            putInt(K_BACKGROUND, cfg.background.ordinal)
+            putInt(K_RHYTHM_INTENSITY, cfg.rhythmIntensity)
+            putInt(K_RHYTHM_DECAY, cfg.rhythmDecay.ordinal)
+            putInt(K_SPECTRUM_HEIGHT, cfg.spectrumHeight)
+            putInt(K_GLOW_PERC, cfg.glowPercGain)
+            putInt(K_GLOW_HARM, cfg.glowHarmGain)
+            putBoolean(K_LYRIC_GLOW, cfg.lyricGlow)
+            putBoolean(K_LYRIC_RHYTHM, cfg.lyricRhythm)
+            putBoolean(K_CONTROL_RHYTHM, cfg.controlRhythm)
+            putInt(K_UI_RHYTHM_INTENSITY, cfg.uiRhythmIntensity)
+            putInt(K_UI_RHYTHM_DECAY, cfg.uiRhythmDecay.ordinal)
+            putInt(K_LYRIC_GLOW_INTENSITY, cfg.lyricGlowIntensity)
             apply()
         }
     }
@@ -218,6 +293,19 @@ object ConfigStore {
         put("gradientProgress", cfg.gradientProgress)
         put("relativeProgress", cfg.relativeProgress)
         put("relativeHighlight", cfg.relativeHighlight)
+        put("background", cfg.background.ordinal)
+        put("rhythmIntensity", cfg.rhythmIntensity)
+        put("rhythmDecay", cfg.rhythmDecay.ordinal)
+        put("spectrumHeight", cfg.spectrumHeight)
+        put("glowPercGain", cfg.glowPercGain)
+        put("glowHarmGain", cfg.glowHarmGain)
+        put("lyricGlow", cfg.lyricGlow)
+        put("lyricRhythm", cfg.lyricRhythm)
+        put("controlRhythm", cfg.controlRhythm)
+        put("uiRhythmIntensity", cfg.uiRhythmIntensity)
+        put("uiRhythmDecay", cfg.uiRhythmDecay.ordinal)
+        put("lyricGlowIntensity", cfg.lyricGlowIntensity)
+        put("sinkAnimation", cfg.sinkAnimation)
         put("safeAreaLeft", cfg.safeAreaLeft)
         put("safeAreaRight", cfg.safeAreaRight)
         put("lyricTextSize", cfg.lyricTextSize)
@@ -246,6 +334,19 @@ object ConfigStore {
             gradientProgress = obj.optBoolean("gradientProgress", true),
             relativeProgress = obj.optBoolean("relativeProgress", true),
             relativeHighlight = obj.optBoolean("relativeHighlight", true),
+            background = RearBackground.entries.getOrElse(obj.optInt("background", RearBackground.PULSE.ordinal)) { RearBackground.PULSE },
+            rhythmIntensity = obj.optInt("rhythmIntensity", 20),
+            rhythmDecay = RhythmDecay.entries.getOrElse(obj.optInt("rhythmDecay", RhythmDecay.SLOW.ordinal)) { RhythmDecay.SLOW },
+            spectrumHeight = obj.optInt("spectrumHeight", 60),
+            glowPercGain = obj.optInt("glowPercGain", 300),
+            glowHarmGain = obj.optInt("glowHarmGain", 500),
+            lyricGlow = obj.optBoolean("lyricGlow", true),
+            lyricRhythm = obj.optBoolean("lyricRhythm", true),
+            controlRhythm = obj.optBoolean("controlRhythm", true),
+            uiRhythmIntensity = obj.optInt("uiRhythmIntensity", 20),
+            uiRhythmDecay = RhythmDecay.entries.getOrElse(obj.optInt("uiRhythmDecay", RhythmDecay.SLOW.ordinal)) { RhythmDecay.SLOW },
+            lyricGlowIntensity = obj.optInt("lyricGlowIntensity", 300),
+            sinkAnimation = obj.optBoolean("sinkAnimation", true),
             safeAreaLeft = obj.optInt("safeAreaLeft", 0),
             safeAreaRight = obj.optInt("safeAreaRight", 0),
             lyricTextSize = obj.optInt("lyricTextSize", 59),
