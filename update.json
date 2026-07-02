@@ -1,7 +1,7 @@
 {
   "versionCode": 6,
   "versionName": "1.0.1",
-  "changelog": "ZHITool 1.0.1 更新：\n新增「音乐律动」音频可视化背景，三种背景可选：默认、律动、声谱。\n「音乐律动」组可调：背景选择、律动强度、律动恢复速度、声谱高度、低音 / 非低音高光增益。\n副句显示动画重做。",
+  "changelog": "ZHITool 1.0.1 更新：\n新增「音乐律动」音频可视化背景，三种背景可选。\n新增「歌词律动」。\n新增「歌词发光」。\n重写并优化副句动画。\n说明：重装可能丢失部分配置；如果重装后无效请重启设备。",
   "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
   "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
   "lyricon": {
