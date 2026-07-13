@@ -92,12 +92,12 @@ private val CARD_COLOR = Color(0xFF1F2024).copy(alpha = 0.94f)
 
 /**
  * 通知卡片堆叠：折叠态最新卡在前、其余露边堆叠，点击展开后可上下滑动浏览。
- * 右下角"在正面打开"胶囊与点击卡片均触发 [onOpenFront]。计时到点回调 [onEmpty]。
+ * 右下角"打开通知"胶囊与点击卡片均执行该通知原始 PendingIntent。计时到点回调 [onEmpty]。
  */
 @Composable
 fun NotifyCardStack(
     items: List<NotifyPayload>,
-    onOpenFront: (String) -> Unit,
+    onOpenFront: (NotifyPayload) -> Unit,
     onEmpty: () -> Unit,
     animateEntrance: Boolean,
     modifier: Modifier = Modifier,
@@ -133,7 +133,11 @@ fun NotifyCardStack(
                 contentReveal = contentReveal.value,
                 capHidePx = capHidePx,
                 modifier = Modifier.align(Alignment.Center),
-                onTap = { listExpanded = true; lastInteraction = System.currentTimeMillis() },
+                onTap = {
+                    if (items.size > 1) listExpanded = true
+                    else items.lastOrNull()?.takeIf { it.openable }?.let(onOpenFront)
+                    lastInteraction = System.currentTimeMillis()
+                },
             )
         } else {
             val scroll = rememberScrollState()
@@ -148,15 +152,17 @@ fun NotifyCardStack(
                     NotificationCard(
                         card = card,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                            .clickable { onOpenFront(card.pkg) },
+                            .clickable(enabled = card.openable) { onOpenFront(card) },
                     )
                 }
             }
         }
-        FrontOpenPill(
-            modifier = Modifier.align(Alignment.BottomEnd),
-            onClick = { onOpenFront(items.last().pkg) },
-        )
+        items.lastOrNull()?.takeIf { it.openable }?.let { latest ->
+            FrontOpenPill(
+                modifier = Modifier.align(Alignment.BottomEnd),
+                onClick = { onOpenFront(latest) },
+            )
+        }
     }
 }
 
@@ -172,7 +178,10 @@ private fun CollapsedStack(
 ) {
     val more = items.size - 1
     Column(
-        modifier = modifier.fillMaxWidth().clickable(enabled = items.size > 1, onClick = onTap),
+        modifier = modifier.fillMaxWidth().clickable(
+            enabled = items.size > 1 || items.lastOrNull()?.openable == true,
+            onClick = onTap,
+        ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         NotificationCard(
@@ -283,7 +292,7 @@ private fun FrontOpenPill(modifier: Modifier = Modifier, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text = "在正面打开 ↗", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        Text(text = "打开通知 ↗", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
 

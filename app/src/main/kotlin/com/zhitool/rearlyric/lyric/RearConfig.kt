@@ -25,6 +25,16 @@ enum class LyricSource { LYRICON, SUPERLYRIC }
 enum class LyricAnimation { NONE, RANDOM_RISE }
 
 /**
+ * 歌词样式（全局，两种数据源都生效）：
+ *  · [DEFAULT] 默认样式（现有整套渲染：词幕全量滚动 / SuperLyric 大封面单句）。
+ *  · [STAGGER_ALTERNATE] 错位交替：流动星空背景（纵深星流，持续后退感）+ 纯净模式（无封面/控制面板/
+ *    电池/小锁），只显示当前句与上一句；逐字随机左右错位、随机大小、上下交替错落、随机前后深度层，
+ *    从下方升起渐显（有逐字时间按逐字顺序，无逐字随机次序），出字后太空漂浮微动 + 同款鼓点发光；
+ *    唱完整句向远处后缩压暗变透明成为"上一句"，新句从面前浮现。
+ */
+enum class LyricStyleMode { DEFAULT, STAGGER_ALTERNATE }
+
+/**
  * 背屏背景：默认（封面取色渐变 + 游走高光）/ 律动（默认之上亮光随音乐能量波动）/
  * 声谱（默认之上叠底部频谱柱，随音乐 FFT 律动）。律动/声谱靠 root 内录（audio policy loopback）监听音频。
  */
@@ -188,6 +198,47 @@ object LyricSourceState {
     val current: LyricSource get() = _flow.value
 
     fun update(value: LyricSource) {
+        _flow.value = value
+    }
+}
+
+/**
+ * 「错位交替」样式的独立配置（与默认样式的 [RearConfig] 完全不通用，也不随包级单独配置分化）。
+ * 安全区微调 / 帧率 / 律动增益等设备级参数仍沿用全局 [RearConfig]（属设备校准而非歌词样式）。
+ */
+data class StaggerConfig(
+    /** 右上角时间显示（位置同默认模式的停靠时钟）。 */
+    val showClock: Boolean = true,
+    /** 字体大小百分比（100=基准；基准本身按一行 6 个汉字排满，比首版更大）。 */
+    val textSizePercent: Int = 100,
+    /** 歌词发光（同默认样式的鼓点光晕效果，独立开关）。 */
+    val lyricGlow: Boolean = true,
+    /** 发光强度 0..300%（独立于默认样式的强度）。 */
+    val lyricGlowIntensity: Int = 300,
+)
+
+object StaggerConfigState {
+    private val _flow = MutableStateFlow(StaggerConfig())
+    val flow: StateFlow<StaggerConfig> = _flow
+
+    val current: StaggerConfig get() = _flow.value
+
+    fun update(cfg: StaggerConfig) {
+        _flow.value = cfg
+    }
+}
+
+/**
+ * 歌词样式选择（全局，[ConfigStore] 落盘）：默认样式 / 错位交替。独立于 [RearConfig]（不随包级
+ * 单独配置分化），背屏据此整页切换渲染分支。
+ */
+object LyricStyleState {
+    private val _flow = MutableStateFlow(LyricStyleMode.DEFAULT)
+    val flow: StateFlow<LyricStyleMode> = _flow
+
+    val current: LyricStyleMode get() = _flow.value
+
+    fun update(value: LyricStyleMode) {
         _flow.value = value
     }
 }

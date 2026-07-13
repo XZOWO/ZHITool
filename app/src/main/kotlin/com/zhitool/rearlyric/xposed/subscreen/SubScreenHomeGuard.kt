@@ -26,8 +26,8 @@ import java.lang.reflect.Method
  * 歌词 Activity 保持前台、渲染链路不被打断。
  *
  * 方法/字段在 subscreencenter 中被混淆，用 DexKit 按稳定的字符串特征定位（同 REAREye）。
- * 若前台包字段定位失败，退化为「reason==aod 一律不返回桌面」（仍只拦自动息屏返回，
- * 用户主动回桌面用的是其它 reason，不受影响）。
+ * Hook 始终安装、每次调用时读取开关；若前台包字段定位或读取失败则直接放行原方法，
+ * 避免 ROM 版本差异误拦其它背屏应用。
  */
 object SubScreenHomeGuard {
     private const val TAG = "ZhiSubScreenGuard"
@@ -61,10 +61,6 @@ object SubScreenHomeGuard {
     }
 
     private fun resolveAndHook(module: XposedModule, classLoader: ClassLoader, apkPath: String) {
-        if (!isEnabled(module)) {
-            module.log(Log.INFO, TAG, "guard disabled by config, skip")
-            return
-        }
         if (!DexKitNative.ensureLoaded(module)) {
             module.log(Log.ERROR, TAG, "libdexkit not loaded, abort")
             return
@@ -115,7 +111,7 @@ object SubScreenHomeGuard {
             module.log(
                 Log.INFO,
                 TAG,
-                "resolved $className.$methodName field=${reflectField?.name ?: "<none, coarse aod-block>"}",
+                "resolved $className.$methodName field=${reflectField?.name ?: "<none, fail-open>"}",
             )
             installHook(module, reflectMethod, reflectField)
         }
@@ -124,24 +120,21 @@ object SubScreenHomeGuard {
     private fun installHook(module: XposedModule, method: Method, field: Field?) {
         module.hook(method).intercept(object : XposedInterface.Hooker {
             override fun intercept(chain: XposedInterface.Chain): Any? {
-                return try {
+                val shouldBlock = runCatching {
                     val reason = chain.getArg(0) as? String
-                    if (reason != AOD_REASON || !isEnabled(module)) return chain.proceed()
-
-                    if (field != null) {
-                        // 外科式：仅当副屏前台是受保护包时拦截，其它应用照常返回桌面。
-                        val fg = runCatching { field.get(chain.thisObject) as? String }.getOrNull()
-                        if (fg == null || fg !in PROTECTED) return chain.proceed()
-                        module.log(Log.INFO, TAG, "block subscreen home on aod (fg=$fg)")
-                    } else {
-                        // 兜底：字段未定位 → aod 一律不返回桌面（只拦自动息屏返回）。
-                        module.log(Log.INFO, TAG, "block subscreen home on aod (coarse)")
+                    if (reason != AOD_REASON || !isEnabled(module) || field == null) {
+                        return@runCatching false
                     }
-                    null
-                } catch (t: Throwable) {
-                    module.log(Log.ERROR, TAG, "intercept error, proceeding", t)
-                    chain.proceed()
-                }
+                    val foreground = field.get(chain.thisObject) as? String
+                        ?: return@runCatching false
+                    foreground in PROTECTED
+                }.onFailure {
+                    module.log(Log.ERROR, TAG, "guard decision failed; fail-open", it)
+                }.getOrDefault(false)
+
+                if (!shouldBlock) return chain.proceed()
+                module.log(Log.INFO, TAG, "block subscreen home on aod")
+                return null
             }
         })
         module.log(Log.INFO, TAG, "subscreen home guard installed")
@@ -150,5 +143,5 @@ object SubScreenHomeGuard {
     private fun isEnabled(module: XposedModule): Boolean =
         runCatching {
             module.getRemotePreferences(PREF).getBoolean(KEY_ENABLED, true)
-        }.getOrDefault(true)
+        }.getOrDefault(false)
 }

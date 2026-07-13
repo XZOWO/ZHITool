@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
@@ -83,6 +84,16 @@
                 android:value="背屏歌词显示" />
         </service>
 
+        <!-- 开机后恢复歌词订阅与自动投放；Root 初始化由 LyricService 自身在后台完成。 -->
+        <receiver
+            android:name=".lyric.LyricBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <!-- 背屏工具保活/常亮/遮盖检测前台服务 -->
         <service
             android:name=".tools.RearToolsService"
@@ -156,15 +167,16 @@
                 android:value="miui" />
         </activity>
 
-        <!-- 背屏通知推送：通知监听服务 + 背屏通知页 -->
-        <service
-            android:name=".tools.notify.ZhiNotificationListener"
-            android:exported="false"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+        <!-- 背屏通知推送：由 LSPosed/SystemUI 捕获后显式发送；不申请通知使用权。 -->
+        <receiver
+            android:name=".tools.notify.NotificationBridgeReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.STATUS_BAR_SERVICE">
             <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
+                <action android:name="com.zhitool.rearlyric.action.NOTIFICATION_POSTED" />
             </intent-filter>
-        </service>
+        </receiver>
 
         <activity
             android:name=".tools.notify.RearNotificationActivity"

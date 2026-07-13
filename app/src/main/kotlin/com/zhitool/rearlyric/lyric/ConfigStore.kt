@@ -60,6 +60,11 @@ object ConfigStore {
     private const val K_PROJECTION_ENABLED = "projection_enabled"
     private const val K_TOOL_PROJECTION_ENABLED = "tool_projection_enabled"
     private const val K_LYRIC_SOURCE = "lyric_source"
+    private const val K_LYRIC_STYLE = "lyric_style"
+    private const val K_ST_CLOCK = "stagger_clock"
+    private const val K_ST_TEXT_SIZE = "stagger_text_size"
+    private const val K_ST_GLOW = "stagger_glow"
+    private const val K_ST_GLOW_INTENSITY = "stagger_glow_intensity"
 
     fun load(context: Context) {
         val sp = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -116,6 +121,17 @@ object ConfigStore {
         ToolProjectionState.update(sp.getBoolean(K_TOOL_PROJECTION_ENABLED, true))
         LyricSourceState.update(
             LyricSource.entries.getOrElse(sp.getInt(K_LYRIC_SOURCE, LyricSource.LYRICON.ordinal)) { LyricSource.LYRICON }
+        )
+        LyricStyleState.update(
+            LyricStyleMode.entries.getOrElse(sp.getInt(K_LYRIC_STYLE, LyricStyleMode.DEFAULT.ordinal)) { LyricStyleMode.DEFAULT }
+        )
+        StaggerConfigState.update(
+            StaggerConfig(
+                showClock = sp.getBoolean(K_ST_CLOCK, true),
+                textSizePercent = sp.getInt(K_ST_TEXT_SIZE, 100),
+                lyricGlow = sp.getBoolean(K_ST_GLOW, true),
+                lyricGlowIntensity = sp.getInt(K_ST_GLOW_INTENSITY, 300),
+            )
         )
 
         // 一次性迁移：旧版手动调出的偏移值（基于旧基准）会与新基准叠加，故重定基归 0，并把绝对项刷到新默认。
@@ -182,6 +198,23 @@ object ConfigStore {
         LyricSourceState.update(source)
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
             .putInt(K_LYRIC_SOURCE, source.ordinal)
+            .apply()
+    }
+
+    fun saveLyricStyle(context: Context, style: LyricStyleMode) {
+        LyricStyleState.update(style)
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putInt(K_LYRIC_STYLE, style.ordinal)
+            .apply()
+    }
+
+    fun saveStagger(context: Context, cfg: StaggerConfig) {
+        StaggerConfigState.update(cfg)
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putBoolean(K_ST_CLOCK, cfg.showClock)
+            .putInt(K_ST_TEXT_SIZE, cfg.textSizePercent)
+            .putBoolean(K_ST_GLOW, cfg.lyricGlow)
+            .putInt(K_ST_GLOW_INTENSITY, cfg.lyricGlowIntensity)
             .apply()
     }
 

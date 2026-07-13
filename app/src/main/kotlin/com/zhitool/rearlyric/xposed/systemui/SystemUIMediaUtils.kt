@@ -52,6 +52,7 @@ object SystemUIMediaUtils {
             if (entry.key !in newTokens) {
                 entry.value.release()
                 iterator.remove()
+                listeners.forEach { it.onSessionDestroyed(entry.value.controller) }
             }
         }
 
@@ -80,7 +81,17 @@ object SystemUIMediaUtils {
 
     fun unregisterListener(listener: MediaControllerCallback): Boolean = listeners.remove(listener)
 
-    private class ControllerWrapper(private val controller: MediaController) {
+    fun controllers(): List<MediaController> = activeSessions.values.map { it.controller }
+
+    /** Exact package first; with no package prefer the currently playing session. */
+    fun controllerFor(packageName: String?): MediaController? {
+        val controllers = controllers()
+        return controllers.firstOrNull { it.packageName == packageName }
+            ?: controllers.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+            ?: controllers.firstOrNull()
+    }
+
+    private class ControllerWrapper(val controller: MediaController) {
         private val callback = object : MediaController.Callback() {
             override fun onMetadataChanged(metadata: MediaMetadata?) {
                 metadata ?: return

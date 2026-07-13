@@ -2,6 +2,7 @@ package com.zhitool.rearlyric
 
 import android.app.Application
 import android.util.Log
+import com.zhitool.rearlyric.core.MediaControl
 import com.zhitool.rearlyric.lyric.ConfigStore
 import com.zhitool.rearlyric.lyric.HookSettings
 import com.zhitool.rearlyric.tools.RearToolsService
@@ -16,6 +17,7 @@ class ZhiApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        MediaControl.initialize(this)
         ConfigStore.load(this)
         HookSettings.load(this)
         ToolsConfigStore.load(this)

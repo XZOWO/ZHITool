@@ -1,8 +1,6 @@
 package com.zhitool.rearlyric.ui.screen
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,13 +18,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.zhitool.rearlyric.ui.components.DropdownOption
+import com.zhitool.rearlyric.ui.components.DropdownPreference
 import com.zhitool.rearlyric.ui.components.NumberTextField
 import com.zhitool.rearlyric.ui.components.OverlayDialog
 import com.zhitool.rearlyric.lyric.AppFilterState
@@ -43,6 +40,9 @@ import com.zhitool.rearlyric.lyric.BatteryMode
 import com.zhitool.rearlyric.lyric.LyricAnimation
 import com.zhitool.rearlyric.lyric.LyricSource
 import com.zhitool.rearlyric.lyric.LyricSourceState
+import com.zhitool.rearlyric.lyric.LyricStyleMode
+import com.zhitool.rearlyric.lyric.LyricStyleState
+import com.zhitool.rearlyric.lyric.StaggerConfigState
 import com.zhitool.rearlyric.lyric.RearBackground
 import com.zhitool.rearlyric.lyric.RhythmDecay
 import com.zhitool.rearlyric.lyric.TextColorMode
@@ -58,8 +58,6 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
-import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.theme.miuixShape
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
@@ -69,6 +67,12 @@ fun ConfigScreen(contentPadding: PaddingValues) {
     val filter by AppFilterState.flow.collectAsState()
     val packageStyles by PackageStyleState.flow.collectAsState()
     val lyricSource by LyricSourceState.flow.collectAsState()
+    val lyricStyle by LyricStyleState.flow.collectAsState()
+    val staggerCfg by StaggerConfigState.flow.collectAsState()
+    // 错位交替（星空）样式：歌词页只显示属于该样式的配置，默认样式的整套配置全部隐藏。
+    val staggerMode = lyricStyle == LyricStyleMode.STAGGER_ALTERNATE
+    // 星空样式组的数字输入弹窗（默认样式的弹窗在 RearConfigEditorContent 内部，各管各的）。
+    var staggerDialog by remember { mutableStateOf<ConfigDialogState?>(null) }
 
     var showFilterPicker by rememberSaveable { mutableStateOf(false) }
     var showPackagePicker by rememberSaveable { mutableStateOf(false) }
@@ -78,6 +82,7 @@ fun ConfigScreen(contentPadding: PaddingValues) {
         PackageStyleConfigScreen(
             contentPadding = contentPadding,
             packageStyle = editingPackage!!,
+            lyricSource = lyricSource,
             onBack = { editingPackage = null },
             onSave = { style ->
                 ConfigStore.savePackageStyles(
@@ -139,12 +144,156 @@ fun ConfigScreen(contentPadding: PaddingValues) {
                 bottom = contentPadding.calculateBottomPadding(),
             ),
         ) {
+            item { SmallTitle("歌词样式") }
             item {
-                RearConfigEditorContent(
-                    title = "基础配置",
-                    cfg = baseConfig,
-                    onUpdate = { ConfigStore.save(context, it) },
-                )
+                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    DropdownPreference(
+                        title = "歌词样式",
+                        summary = when (lyricStyle) {
+                            LyricStyleMode.DEFAULT -> "默认样式"
+                            LyricStyleMode.STAGGER_ALTERNATE -> "错位交替（流动星空 + 错落漂浮）"
+                        },
+                        selectedValue = lyricStyle,
+                        options = listOf(
+                            DropdownOption("默认样式", LyricStyleMode.DEFAULT),
+                            DropdownOption("错位交替", LyricStyleMode.STAGGER_ALTERNATE),
+                        ),
+                        onSelected = { ConfigStore.saveLyricStyle(context, it) },
+                    )
+                }
+            }
+
+            if (staggerMode) {
+                // 星空样式独立配置（与默认样式的基础配置完全不通用）。
+                item { SmallTitle("星空样式") }
+                item {
+                    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                        SwitchPreference(
+                            title = "时间显示",
+                            summary = "右上角时钟（位置同默认模式）",
+                            checked = staggerCfg.showClock,
+                            onCheckedChange = {
+                                ConfigStore.saveStagger(context, staggerCfg.copy(showClock = it))
+                            },
+                        )
+                        ArrowPreference(
+                            title = "字体大小",
+                            summary = "${staggerCfg.textSizePercent}%（100 为基准）",
+                            onClick = {
+                                staggerDialog = ConfigDialogState.IntInput(
+                                    "字体大小", staggerCfg.textSizePercent, "%", false,
+                                ) {
+                                    ConfigStore.saveStagger(
+                                        context, staggerCfg.copy(textSizePercent = it.coerceIn(40, 200)),
+                                    )
+                                }
+                            },
+                        )
+                        SwitchPreference(
+                            title = "歌词发光",
+                            summary = "当前句随鼓点发光（root 内录驱动）",
+                            checked = staggerCfg.lyricGlow,
+                            onCheckedChange = {
+                                ConfigStore.saveStagger(context, staggerCfg.copy(lyricGlow = it))
+                            },
+                        )
+                        if (staggerCfg.lyricGlow) {
+                            ArrowPreference(
+                                title = "发光强度",
+                                summary = "${staggerCfg.lyricGlowIntensity}%（0–300）",
+                                onClick = {
+                                    staggerDialog = ConfigDialogState.IntInput(
+                                        "发光强度", staggerCfg.lyricGlowIntensity, "%", false,
+                                    ) {
+                                        ConfigStore.saveStagger(
+                                            context, staggerCfg.copy(lyricGlowIntensity = it.coerceIn(0, 300)),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+                // 错位交替仍实际借用这些设备级参数；把无关的默认样式配置隐藏，只露出有效项。
+                item { SmallTitle("星空通用调节") }
+                item {
+                    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                        DropdownPreference(
+                            title = "背屏刷新率",
+                            summary = frameRateLabel(baseConfig.frameRate),
+                            selectedValue = baseConfig.frameRate,
+                            options = listOf(
+                                DropdownOption("120 帧", LyricFrameRate.FPS_120),
+                                DropdownOption("60 帧（省电）", LyricFrameRate.FPS_60),
+                            ),
+                            onSelected = { ConfigStore.save(context, baseConfig.copy(frameRate = it)) },
+                        )
+                        ArrowPreference(
+                            title = "左安全区",
+                            summary = baseConfig.safeAreaLeft.toString(),
+                            onClick = {
+                                staggerDialog = ConfigDialogState.IntInput(
+                                    "左安全区", baseConfig.safeAreaLeft, "步", true,
+                                ) { ConfigStore.save(context, baseConfig.copy(safeAreaLeft = it)) }
+                            },
+                        )
+                        ArrowPreference(
+                            title = "右安全区",
+                            summary = baseConfig.safeAreaRight.toString(),
+                            onClick = {
+                                staggerDialog = ConfigDialogState.IntInput(
+                                    "右安全区", baseConfig.safeAreaRight, "步", true,
+                                ) { ConfigStore.save(context, baseConfig.copy(safeAreaRight = it)) }
+                            },
+                        )
+                        if (staggerCfg.lyricGlow) {
+                            DropdownPreference(
+                                title = "发光回落速度",
+                                summary = rhythmDecayLabel(baseConfig.uiRhythmDecay),
+                                selectedValue = baseConfig.uiRhythmDecay,
+                                options = RhythmDecay.entries.map { DropdownOption(rhythmDecayLabel(it), it) },
+                                onSelected = { ConfigStore.save(context, baseConfig.copy(uiRhythmDecay = it)) },
+                            )
+                            ArrowPreference(
+                                title = "低音高光增益",
+                                summary = "${baseConfig.glowPercGain}%（低音反应强度）",
+                                onClick = {
+                                    staggerDialog = ConfigDialogState.IntInput(
+                                        "低音高光增益", baseConfig.glowPercGain, "%", false,
+                                    ) {
+                                        ConfigStore.save(
+                                            context,
+                                            baseConfig.copy(glowPercGain = it.coerceIn(0, 1000)),
+                                        )
+                                    }
+                                },
+                            )
+                            ArrowPreference(
+                                title = "非低音高光增益",
+                                summary = "${baseConfig.glowHarmGain}%（非低音反应强度）",
+                                onClick = {
+                                    staggerDialog = ConfigDialogState.IntInput(
+                                        "非低音高光增益", baseConfig.glowHarmGain, "%", false,
+                                    ) {
+                                        ConfigStore.save(
+                                            context,
+                                            baseConfig.copy(glowHarmGain = it.coerceIn(0, 1000)),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            } else {
+                item {
+                    RearConfigEditorContent(
+                        title = "基础配置",
+                        cfg = baseConfig,
+                        lyricSource = lyricSource,
+                        onUpdate = { ConfigStore.save(context, it) },
+                    )
+                }
             }
 
             item { SmallTitle("包配置") }
@@ -156,20 +305,24 @@ fun ConfigScreen(contentPadding: PaddingValues) {
                         checked = filter.onlySelected,
                         onCheckedChange = { ConfigStore.saveFilter(context, filter.copy(onlySelected = it)) },
                     )
-                    ArrowPreference(
-                        title = "选择监听应用",
-                        summary = "已选 ${filter.selectedApps.size} 个",
-                        onClick = { showFilterPicker = true },
-                    )
-                    ArrowPreference(
-                        title = "添加单独配置",
-                        summary = "为某个播放器单独设置歌词与封面样式",
-                        onClick = { showPackagePicker = true },
-                    )
+                    if (filter.onlySelected) {
+                        ArrowPreference(
+                            title = "选择监听应用",
+                            summary = "已选 ${filter.selectedApps.size} 个",
+                            onClick = { showFilterPicker = true },
+                        )
+                    }
+                    if (!staggerMode) {
+                        ArrowPreference(
+                            title = "添加单独配置",
+                            summary = "为某个播放器单独设置歌词与封面样式",
+                            onClick = { showPackagePicker = true },
+                        )
+                    }
                 }
             }
 
-            if (packageStyles.isNotEmpty()) {
+            if (!staggerMode && packageStyles.isNotEmpty()) {
                 item { SmallTitle("单独配置列表") }
                 item {
                     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
@@ -184,28 +337,21 @@ fun ConfigScreen(contentPadding: PaddingValues) {
                 }
             }
 
-            item { SmallTitle("歌词动画") }
-            item {
+            if (!staggerMode && lyricSource == LyricSource.SUPERLYRIC) item { SmallTitle("歌词动画") }
+            if (!staggerMode && lyricSource == LyricSource.SUPERLYRIC) item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    val superLyric = lyricSource == LyricSource.SUPERLYRIC
-                    ArrowPreference(
+                    DropdownPreference(
                         title = "歌词动画",
-                        summary = if (!superLyric) {
-                            "仅 SuperLyric 数据源可用"
-                        } else when (baseConfig.lyricAnimation) {
+                        summary = when (baseConfig.lyricAnimation) {
                             LyricAnimation.NONE -> "无"
                             LyricAnimation.RANDOM_RISE -> "随机升起"
                         },
-                        onClick = {
-                            if (superLyric) {
-                                val next = if (baseConfig.lyricAnimation == LyricAnimation.RANDOM_RISE) {
-                                    LyricAnimation.NONE
-                                } else {
-                                    LyricAnimation.RANDOM_RISE
-                                }
-                                ConfigStore.save(context, baseConfig.copy(lyricAnimation = next))
-                            }
-                        },
+                        selectedValue = baseConfig.lyricAnimation,
+                        options = listOf(
+                            DropdownOption("无", LyricAnimation.NONE),
+                            DropdownOption("随机升起", LyricAnimation.RANDOM_RISE),
+                        ),
+                        onSelected = { ConfigStore.save(context, baseConfig.copy(lyricAnimation = it)) },
                     )
                 }
             }
@@ -213,20 +359,18 @@ fun ConfigScreen(contentPadding: PaddingValues) {
             item { SmallTitle("封面与来源") }
             item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    ArrowPreference(
+                    DropdownPreference(
                         title = "歌词数据源",
                         summary = when (lyricSource) {
                             LyricSource.LYRICON -> "词幕（lyricon 生态）"
                             LyricSource.SUPERLYRIC -> "SuperLyric（实时逐句）"
                         },
-                        onClick = {
-                            val next = if (lyricSource == LyricSource.LYRICON) {
-                                LyricSource.SUPERLYRIC
-                            } else {
-                                LyricSource.LYRICON
-                            }
-                            ConfigStore.saveLyricSource(context, next)
-                        },
+                        selectedValue = lyricSource,
+                        options = listOf(
+                            DropdownOption("词幕（lyricon 生态）", LyricSource.LYRICON),
+                            DropdownOption("SuperLyric（实时逐句）", LyricSource.SUPERLYRIC),
+                        ),
+                        onSelected = { ConfigStore.saveLyricSource(context, it) },
                     )
                     ArrowPreference(
                         title = "封面来源",
@@ -239,12 +383,18 @@ fun ConfigScreen(contentPadding: PaddingValues) {
             item { Spacer(Modifier.height(12.dp)) }
         }
     }
+
+    ConfigDialogHost(
+        state = staggerDialog,
+        onDismiss = { staggerDialog = null },
+    )
 }
 
 @Composable
 private fun PackageStyleConfigScreen(
     contentPadding: PaddingValues,
     packageStyle: PackageStyle,
+    lyricSource: LyricSource,
     onBack: () -> Unit,
     onSave: (PackageStyle) -> Unit,
     onDelete: (PackageStyle) -> Unit,
@@ -278,6 +428,7 @@ private fun PackageStyleConfigScreen(
                 RearConfigEditorContent(
                     title = "单独配置",
                     cfg = packageStyle.config,
+                    lyricSource = lyricSource,
                     onUpdate = { onSave(packageStyle.copy(config = it)) },
                 )
             }
@@ -300,6 +451,7 @@ private fun PackageStyleConfigScreen(
 private fun RearConfigEditorContent(
     title: String,
     cfg: RearConfig,
+    lyricSource: LyricSource,
     onUpdate: (RearConfig) -> Unit,
 ) {
     var dialogState by remember { mutableStateOf<ConfigDialogState?>(null) }
@@ -307,28 +459,14 @@ private fun RearConfigEditorContent(
     SmallTitle(title)
     ConfigBasicCard(
         cfg = cfg,
+        lyricSource = lyricSource,
         onUpdate = onUpdate,
-        onChoose = { t, current, options, confirm ->
-            dialogState = ConfigDialogState.Choice(
-                title = t,
-                selectedValue = current,
-                options = options,
-                onConfirm = confirm,
-            )
-        },
     )
     SmallTitle("音乐律动")
     ConfigRhythmCard(
         cfg = cfg,
+        lyricSource = lyricSource,
         onUpdate = onUpdate,
-        onChoose = { t, current, options, confirm ->
-            dialogState = ConfigDialogState.Choice(
-                title = t,
-                selectedValue = current,
-                options = options,
-                onConfirm = confirm,
-            )
-        },
         onEditInt = { t, value, suffix, allowNegative, confirm ->
             dialogState = ConfigDialogState.IntInput(t, value, suffix, allowNegative, confirm)
         },
@@ -344,24 +482,18 @@ private fun RearConfigEditorContent(
     SmallTitle("进度高亮")
     ConfigProgressCard(
         cfg = cfg,
+        lyricSource = lyricSource,
         onUpdate = onUpdate,
     )
     SmallTitle("电池与充电")
     ConfigBatteryCard(
         cfg = cfg,
         onUpdate = onUpdate,
-        onChoose = { t, current, options, confirm ->
-            dialogState = ConfigDialogState.Choice(
-                title = t,
-                selectedValue = current,
-                options = options,
-                onConfirm = confirm,
-            )
-        },
     )
     SmallTitle("安全区与微调")
     ConfigAdjustCard(
         cfg = cfg,
+        lyricSource = lyricSource,
         onUpdate = onUpdate,
         onEditInt = { t, value, suffix, allowNegative, confirm ->
             dialogState = ConfigDialogState.IntInput(t, value, suffix, allowNegative, confirm)
@@ -382,29 +514,27 @@ private fun RearConfigEditorContent(
 @Composable
 private fun ConfigRhythmCard(
     cfg: RearConfig,
+    lyricSource: LyricSource,
     onUpdate: (RearConfig) -> Unit,
-    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
     onEditInt: (title: String, value: Int, suffix: String, allowNegative: Boolean, onConfirm: (Int) -> Unit) -> Unit,
 ) {
+    val lyricon = lyricSource == LyricSource.LYRICON
+    val coverControlsAvailable = cfg.cover != CoverPosition.NONE
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
+        DropdownPreference(
             title = "背景",
             summary = when (cfg.background) {
                 RearBackground.DEFAULT -> "默认背景"
                 RearBackground.PULSE -> "律动背景（亮光随音乐波动）"
                 RearBackground.SPECTRUM -> "声谱背景（默认背景 + 声谱律动）"
             },
-            onClick = {
-                onChoose(
-                    "背景",
-                    cfg.background.name,
-                    listOf(
-                        ChoiceItem("默认背景", RearBackground.DEFAULT.name),
-                        ChoiceItem("律动背景", RearBackground.PULSE.name),
-                        ChoiceItem("声谱背景", RearBackground.SPECTRUM.name),
-                    )
-                ) { onUpdate(cfg.copy(background = RearBackground.valueOf(it))) }
-            },
+            selectedValue = cfg.background,
+            options = listOf(
+                DropdownOption("默认背景", RearBackground.DEFAULT),
+                DropdownOption("律动背景", RearBackground.PULSE),
+                DropdownOption("声谱背景", RearBackground.SPECTRUM),
+            ),
+            onSelected = { onUpdate(cfg.copy(background = it)) },
         )
         if (cfg.background != RearBackground.DEFAULT) {
             ArrowPreference(
@@ -416,16 +546,12 @@ private fun ConfigRhythmCard(
                     }
                 },
             )
-            ArrowPreference(
+            DropdownPreference(
                 title = "背景回落速度",
                 summary = rhythmDecayLabel(cfg.rhythmDecay) + "（仅背景，回落平滑快慢）",
-                onClick = {
-                    onChoose(
-                        "背景回落速度",
-                        cfg.rhythmDecay.name,
-                        RhythmDecay.entries.map { ChoiceItem(rhythmDecayLabel(it), it.name) },
-                    ) { onUpdate(cfg.copy(rhythmDecay = RhythmDecay.valueOf(it))) }
-                },
+                selectedValue = cfg.rhythmDecay,
+                options = RhythmDecay.entries.map { DropdownOption(rhythmDecayLabel(it), it) },
+                onSelected = { onUpdate(cfg.copy(rhythmDecay = it)) },
             )
             if (cfg.background == RearBackground.SPECTRUM) {
                 ArrowPreference(
@@ -439,38 +565,43 @@ private fun ConfigRhythmCard(
                 )
             }
         }
-        // 三个各自独立的开关：歌词发光 / 歌词律动 / 空间律动。
-        SwitchPreference(
-            title = "歌词发光",
-            summary = "当前句高亮随鼓点叠加发光光晕；会额外启动内录，增加功耗",
-            checked = cfg.lyricGlow,
-            onCheckedChange = { onUpdate(cfg.copy(lyricGlow = it)) },
-        )
-        if (cfg.lyricGlow) {
-            ArrowPreference(
-                title = "歌词发光强度",
-                summary = "${cfg.lyricGlowIntensity}%（只影响发光光晕强弱，不影响缩放幅度）",
-                onClick = {
-                    onEditInt("歌词发光强度", cfg.lyricGlowIntensity, "%", false) {
-                        onUpdate(cfg.copy(lyricGlowIntensity = it.coerceIn(0, 300)))
-                    }
-                },
+        // SuperLyric 单句渲染没有歌词光晕/整块歌词缩放，只显示真正生效的选项。
+        if (lyricon) {
+            SwitchPreference(
+                title = "歌词发光",
+                summary = "当前句高亮随鼓点叠加发光光晕；会额外启动内录，增加功耗",
+                checked = cfg.lyricGlow,
+                onCheckedChange = { onUpdate(cfg.copy(lyricGlow = it)) },
+            )
+            if (cfg.lyricGlow) {
+                ArrowPreference(
+                    title = "歌词发光强度",
+                    summary = "${cfg.lyricGlowIntensity}%（只影响发光光晕强弱，不影响缩放幅度）",
+                    onClick = {
+                        onEditInt("歌词发光强度", cfg.lyricGlowIntensity, "%", false) {
+                            onUpdate(cfg.copy(lyricGlowIntensity = it.coerceIn(0, 300)))
+                        }
+                    },
+                )
+            }
+            SwitchPreference(
+                title = "歌词律动",
+                summary = "整屏歌词随节奏整体缩放（锚定当前句、不偏移）；会额外启动内录，增加功耗",
+                checked = cfg.lyricRhythm,
+                onCheckedChange = { onUpdate(cfg.copy(lyricRhythm = it)) },
             )
         }
-        SwitchPreference(
-            title = "歌词律动",
-            summary = "整屏歌词随节奏整体缩放（锚定当前句、不偏移）；会额外启动内录，增加功耗",
-            checked = cfg.lyricRhythm,
-            onCheckedChange = { onUpdate(cfg.copy(lyricRhythm = it)) },
-        )
-        SwitchPreference(
-            title = "空间律动",
-            summary = "封面与控制面板按钮随节奏缩放；会额外启动内录，增加功耗",
-            checked = cfg.controlRhythm,
-            onCheckedChange = { onUpdate(cfg.copy(controlRhythm = it)) },
-        )
-        // 缩放类律动（歌词律动 + 空间律动）共用的强度/回落，任一开启即显示。
-        if (cfg.lyricRhythm || cfg.controlRhythm) {
+        if (coverControlsAvailable) {
+            SwitchPreference(
+                title = "空间律动",
+                summary = "封面与控制面板按钮随节奏缩放；会额外启动内录，增加功耗",
+                checked = cfg.controlRhythm,
+                onCheckedChange = { onUpdate(cfg.copy(controlRhythm = it)) },
+            )
+        }
+        val lyricMotion = lyricon && cfg.lyricRhythm
+        val controlMotion = coverControlsAvailable && cfg.controlRhythm
+        if (lyricMotion || controlMotion) {
             ArrowPreference(
                 title = "律动强度",
                 summary = "${cfg.uiRhythmIntensity}（0–100，控制歌词/封面/按钮缩放幅度，独立于背景）",
@@ -480,21 +611,17 @@ private fun ConfigRhythmCard(
                     }
                 },
             )
-            ArrowPreference(
+            DropdownPreference(
                 title = "律动回落速度",
                 summary = rhythmDecayLabel(cfg.uiRhythmDecay) + "（仅歌词/空间律动，比背景整体更慢，同档更柔）",
-                onClick = {
-                    onChoose(
-                        "律动回落速度",
-                        cfg.uiRhythmDecay.name,
-                        RhythmDecay.entries.map { ChoiceItem(rhythmDecayLabel(it), it.name) },
-                    ) { onUpdate(cfg.copy(uiRhythmDecay = RhythmDecay.valueOf(it))) }
-                },
+                selectedValue = cfg.uiRhythmDecay,
+                options = RhythmDecay.entries.map { DropdownOption(rhythmDecayLabel(it), it) },
+                onSelected = { onUpdate(cfg.copy(uiRhythmDecay = it)) },
             )
         }
-        // 低音-非低音增益：背景律动/声谱或任一 UI 律动开启即显示（共用）。
-        val anyRhythm = cfg.lyricGlow || cfg.lyricRhythm || cfg.controlRhythm
-        if (cfg.background == RearBackground.PULSE || anyRhythm) {
+        // 背景律动/声谱或任一实际生效的 UI 律动都会读取这两项。
+        val anyUiRhythm = (lyricon && (cfg.lyricGlow || cfg.lyricRhythm)) || controlMotion
+        if (cfg.background != RearBackground.DEFAULT || anyUiRhythm) {
             ArrowPreference(
                 title = "低音高光增益",
                 summary = "${cfg.glowPercGain}%（低音反应强度）",
@@ -525,31 +652,31 @@ private fun rhythmDecayLabel(decay: RhythmDecay): String = when (decay) {
     RhythmDecay.VERY_SLOW -> "极慢"
 }
 
+private fun frameRateLabel(frameRate: LyricFrameRate): String = when (frameRate) {
+    LyricFrameRate.FPS_120 -> "120 帧"
+    LyricFrameRate.FPS_60 -> "60 帧（省电）"
+}
+
 @Composable
 private fun ConfigBatteryCard(
     cfg: RearConfig,
     onUpdate: (RearConfig) -> Unit,
-    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
 ) {
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
+        DropdownPreference(
             title = "电池",
             summary = when (cfg.batteryMode) {
                 BatteryMode.NONE -> "不显示"
                 BatteryMode.WHEN_CHARGING -> "充电时显示"
                 BatteryMode.ALWAYS -> "一直显示"
             },
-            onClick = {
-                onChoose(
-                    "电池",
-                    cfg.batteryMode.name,
-                    listOf(
-                        ChoiceItem("不显示", BatteryMode.NONE.name),
-                        ChoiceItem("充电时显示", BatteryMode.WHEN_CHARGING.name),
-                        ChoiceItem("一直显示", BatteryMode.ALWAYS.name),
-                    )
-                ) { onUpdate(cfg.copy(batteryMode = BatteryMode.valueOf(it))) }
-            },
+            selectedValue = cfg.batteryMode,
+            options = listOf(
+                DropdownOption("不显示", BatteryMode.NONE),
+                DropdownOption("充电时显示", BatteryMode.WHEN_CHARGING),
+                DropdownOption("一直显示", BatteryMode.ALWAYS),
+            ),
+            onSelected = { onUpdate(cfg.copy(batteryMode = it)) },
         )
         SwitchPreference(
             title = "播放时充电动画",
@@ -563,64 +690,51 @@ private fun ConfigBatteryCard(
 @Composable
 private fun ConfigBasicCard(
     cfg: RearConfig,
+    lyricSource: LyricSource,
     onUpdate: (RearConfig) -> Unit,
-    onChoose: (title: String, current: String, options: List<ChoiceItem>, onConfirm: (String) -> Unit) -> Unit,
 ) {
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        ArrowPreference(
+        DropdownPreference(
             title = "封面位置",
             summary = when (cfg.cover) {
                 CoverPosition.LEFT -> "左侧"
                 CoverPosition.NONE -> "不显示"
                 CoverPosition.RIGHT -> "右侧"
             },
-            onClick = {
-                onChoose(
-                    "封面位置",
-                    cfg.cover.name,
-                    listOf(
-                        ChoiceItem("左侧", CoverPosition.LEFT.name),
-                        ChoiceItem("不显示", CoverPosition.NONE.name),
-                        ChoiceItem("右侧", CoverPosition.RIGHT.name),
-                    )
-                ) { onUpdate(cfg.copy(cover = CoverPosition.valueOf(it))) }
-            },
+            selectedValue = cfg.cover,
+            options = listOf(
+                DropdownOption("左侧", CoverPosition.LEFT),
+                DropdownOption("不显示", CoverPosition.NONE),
+                DropdownOption("右侧", CoverPosition.RIGHT),
+            ),
+            onSelected = { onUpdate(cfg.copy(cover = it)) },
         )
-        ArrowPreference(
-            title = "封面样式",
-            summary = when (cfg.coverShape) {
-                CoverShape.SQUARE -> "方形"
-                CoverShape.CIRCLE -> "圆形（静态）"
-                CoverShape.CIRCLE_ROTATE -> "圆形（转动）"
-            },
-            onClick = {
-                onChoose(
-                    "封面样式",
-                    cfg.coverShape.name,
-                    listOf(
-                        ChoiceItem("方形", CoverShape.SQUARE.name),
-                        ChoiceItem("圆形（静态）", CoverShape.CIRCLE.name),
-                        ChoiceItem("圆形（转动）", CoverShape.CIRCLE_ROTATE.name),
-                    )
-                ) { onUpdate(cfg.copy(coverShape = CoverShape.valueOf(it))) }
-            },
-        )
-        ArrowPreference(
+        if (cfg.cover != CoverPosition.NONE) {
+            DropdownPreference(
+                title = "封面样式",
+                summary = when (cfg.coverShape) {
+                    CoverShape.SQUARE -> "方形"
+                    CoverShape.CIRCLE -> "圆形（静态）"
+                    CoverShape.CIRCLE_ROTATE -> "圆形（转动）"
+                },
+                selectedValue = cfg.coverShape,
+                options = listOf(
+                    DropdownOption("方形", CoverShape.SQUARE),
+                    DropdownOption("圆形（静态）", CoverShape.CIRCLE),
+                    DropdownOption("圆形（转动）", CoverShape.CIRCLE_ROTATE),
+                ),
+                onSelected = { onUpdate(cfg.copy(coverShape = it)) },
+            )
+        }
+        DropdownPreference(
             title = "背屏刷新率",
-            summary = when (cfg.frameRate) {
-                LyricFrameRate.FPS_120 -> "120 帧"
-                LyricFrameRate.FPS_60 -> "60 帧（省电）"
-            },
-            onClick = {
-                onChoose(
-                    "背屏刷新率",
-                    cfg.frameRate.name,
-                    listOf(
-                        ChoiceItem("120 帧", LyricFrameRate.FPS_120.name),
-                        ChoiceItem("60 帧（省电）", LyricFrameRate.FPS_60.name),
-                    )
-                ) { onUpdate(cfg.copy(frameRate = LyricFrameRate.valueOf(it))) }
-            },
+            summary = frameRateLabel(cfg.frameRate),
+            selectedValue = cfg.frameRate,
+            options = listOf(
+                DropdownOption("120 帧", LyricFrameRate.FPS_120),
+                DropdownOption("60 帧（省电）", LyricFrameRate.FPS_60),
+            ),
+            onSelected = { onUpdate(cfg.copy(frameRate = it)) },
         )
         SwitchPreference(
             title = "封面取色背景",
@@ -628,43 +742,43 @@ private fun ConfigBasicCard(
             checked = cfg.dynamicBackground,
             onCheckedChange = { onUpdate(cfg.copy(dynamicBackground = it)) },
         )
-        ArrowPreference(
+        DropdownPreference(
             title = "文字配色",
             summary = when (cfg.textColorMode) {
                 TextColorMode.DEFAULT -> "默认白色"
                 TextColorMode.COVER -> "提取封面颜色"
                 TextColorMode.COVER_GRADIENT -> "提取封面渐变色"
             },
-            onClick = {
-                onChoose(
-                    "文字配色",
-                    cfg.textColorMode.name,
-                    listOf(
-                        ChoiceItem("默认白色", TextColorMode.DEFAULT.name),
-                        ChoiceItem("提取封面颜色", TextColorMode.COVER.name),
-                        ChoiceItem("提取封面渐变色", TextColorMode.COVER_GRADIENT.name),
-                    )
-                ) { onUpdate(cfg.copy(textColorMode = TextColorMode.valueOf(it))) }
-            },
+            selectedValue = cfg.textColorMode,
+            options = listOf(
+                DropdownOption("默认白色", TextColorMode.DEFAULT),
+                DropdownOption("提取封面颜色", TextColorMode.COVER),
+                DropdownOption("提取封面渐变色", TextColorMode.COVER_GRADIENT),
+            ),
+            onSelected = { onUpdate(cfg.copy(textColorMode = it)) },
         )
-        SwitchPreference(
-            title = "显示副歌词",
-            summary = "显示双声部/翻译/罗马音副行",
-            checked = cfg.showSecondary,
-            onCheckedChange = { onUpdate(cfg.copy(showSecondary = it)) },
-        )
-        SwitchPreference(
-            title = "显示翻译",
-            summary = "有翻译时作为副行显示",
-            checked = cfg.showTranslation,
-            onCheckedChange = { onUpdate(cfg.copy(showTranslation = it)) },
-        )
-        SwitchPreference(
-            title = "显示罗马音",
-            summary = "有罗马音时作为副行显示",
-            checked = cfg.showRoma,
-            onCheckedChange = { onUpdate(cfg.copy(showRoma = it)) },
-        )
+        if (lyricSource == LyricSource.LYRICON) {
+            SwitchPreference(
+                title = "显示副歌词",
+                summary = "显示双声部/翻译/罗马音副行",
+                checked = cfg.showSecondary,
+                onCheckedChange = { onUpdate(cfg.copy(showSecondary = it)) },
+            )
+            if (cfg.showSecondary) {
+                SwitchPreference(
+                    title = "显示翻译",
+                    summary = "有翻译时作为副行显示",
+                    checked = cfg.showTranslation,
+                    onCheckedChange = { onUpdate(cfg.copy(showTranslation = it)) },
+                )
+                SwitchPreference(
+                    title = "显示罗马音",
+                    summary = "有罗马音时作为副行显示",
+                    checked = cfg.showRoma,
+                    onCheckedChange = { onUpdate(cfg.copy(showRoma = it)) },
+                )
+            }
+        }
     }
 }
 
@@ -698,39 +812,46 @@ private fun ConfigTextCard(
 @Composable
 private fun ConfigProgressCard(
     cfg: RearConfig,
+    lyricSource: LyricSource,
     onUpdate: (RearConfig) -> Unit,
 ) {
     Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-        SwitchPreference(
-            title = "渐变高亮",
-            summary = "高亮扫过的前沿用渐变软边而非硬切",
-            checked = cfg.gradientProgress,
-            onCheckedChange = { onUpdate(cfg.copy(gradientProgress = it)) },
-        )
         SwitchPreference(
             title = "相对进度",
             summary = "当前词/字内按时间平滑扫过（关闭则到点整体点亮）",
             checked = cfg.relativeProgress,
             onCheckedChange = { onUpdate(cfg.copy(relativeProgress = it)) },
         )
-        SwitchPreference(
-            title = "相对高亮",
-            summary = "汉字逐字点亮（关闭则整词为单位，较粗）",
-            checked = cfg.relativeHighlight,
-            onCheckedChange = { onUpdate(cfg.copy(relativeHighlight = it)) },
-        )
+        if (cfg.relativeProgress) {
+            SwitchPreference(
+                title = "渐变高亮",
+                summary = "高亮扫过的前沿用渐变软边而非硬切",
+                checked = cfg.gradientProgress,
+                onCheckedChange = { onUpdate(cfg.copy(gradientProgress = it)) },
+            )
+        }
+        if (lyricSource == LyricSource.LYRICON) {
+            SwitchPreference(
+                title = "相对高亮",
+                summary = "汉字逐字点亮（关闭则整词为单位，较粗）",
+                checked = cfg.relativeHighlight,
+                onCheckedChange = { onUpdate(cfg.copy(relativeHighlight = it)) },
+            )
+        }
         SwitchPreference(
             title = "模拟逐字",
             summary = "无逐字时间的歌曲按时长假装逐字；关闭则整句整句切",
             checked = cfg.simulateWordTiming,
             onCheckedChange = { onUpdate(cfg.copy(simulateWordTiming = it)) },
         )
-        SwitchPreference(
-            title = "逐字抬起",
-            summary = "未唱文字下沉、唱到时抬起回正；关闭则未唱/已唱文字保持同一水平线",
-            checked = cfg.sinkAnimation,
-            onCheckedChange = { onUpdate(cfg.copy(sinkAnimation = it)) },
-        )
+        if (lyricSource == LyricSource.LYRICON) {
+            SwitchPreference(
+                title = "逐字抬起",
+                summary = "未唱文字下沉、唱到时抬起回正；关闭则未唱/已唱文字保持同一水平线",
+                checked = cfg.sinkAnimation,
+                onCheckedChange = { onUpdate(cfg.copy(sinkAnimation = it)) },
+            )
+        }
     }
 }
 
@@ -741,6 +862,7 @@ private fun ConfigProgressCard(
 @Composable
 private fun ConfigAdjustCard(
     cfg: RearConfig,
+    lyricSource: LyricSource,
     onUpdate: (RearConfig) -> Unit,
     onEditInt: (title: String, value: Int, suffix: String, allowNegative: Boolean, onConfirm: (Int) -> Unit) -> Unit,
 ) {
@@ -757,35 +879,36 @@ private fun ConfigAdjustCard(
             summary = cfg.safeAreaRight.toString(),
             onClick = { onEditInt("右安全区", cfg.safeAreaRight, "步", true) { onUpdate(cfg.copy(safeAreaRight = it)) } },
         )
-        ArrowPreference(
-            title = "歌词文字大小",
-            summary = if (currentTextPx > 0) "$currentTextPx px" else "自动",
-            onClick = { onEditInt("歌词文字大小", currentTextPx, "px", false) { onUpdate(cfg.copy(lyricTextSize = it)) } },
-        )
-        ArrowPreference(
-            title = "解锁小锁半径",
-            summary = "${cfg.lockSize} dp",
-            onClick = { onEditInt("解锁小锁半径", cfg.lockSize, "dp", false) { onUpdate(cfg.copy(lockSize = it)) } },
-        )
-        ArrowPreference(
-            title = "解锁小锁左右",
-            summary = cfg.lockOffset.toString(),
-            onClick = { onEditInt("解锁小锁左右", cfg.lockOffset, "步", true) { onUpdate(cfg.copy(lockOffset = it)) } },
-        )
-        ArrowPreference(
-            title = "拖动时间左右",
-            summary = cfg.timeOffset.toString(),
-            onClick = { onEditInt("拖动时间左右", cfg.timeOffset, "步", true) { onUpdate(cfg.copy(timeOffset = it)) } },
-        )
-        ArrowPreference(
-            title = "时间细线长度",
-            summary = "${cfg.timeLineLength} dp",
-            onClick = { onEditInt("时间细线长度", cfg.timeLineLength, "dp", false) { onUpdate(cfg.copy(timeLineLength = it)) } },
-        )
+        // 字号、锁定与拖动时间轴只存在于词幕的完整歌词交互页；SuperLyric 单句页不消费这些参数。
+        if (lyricSource == LyricSource.LYRICON) {
+            ArrowPreference(
+                title = "歌词文字大小",
+                summary = if (currentTextPx > 0) "$currentTextPx px" else "自动",
+                onClick = { onEditInt("歌词文字大小", currentTextPx, "px", false) { onUpdate(cfg.copy(lyricTextSize = it)) } },
+            )
+            ArrowPreference(
+                title = "解锁小锁半径",
+                summary = "${cfg.lockSize} dp",
+                onClick = { onEditInt("解锁小锁半径", cfg.lockSize, "dp", false) { onUpdate(cfg.copy(lockSize = it)) } },
+            )
+            ArrowPreference(
+                title = "解锁小锁左右",
+                summary = cfg.lockOffset.toString(),
+                onClick = { onEditInt("解锁小锁左右", cfg.lockOffset, "步", true) { onUpdate(cfg.copy(lockOffset = it)) } },
+            )
+            ArrowPreference(
+                title = "拖动时间左右",
+                summary = cfg.timeOffset.toString(),
+                onClick = { onEditInt("拖动时间左右", cfg.timeOffset, "步", true) { onUpdate(cfg.copy(timeOffset = it)) } },
+            )
+            ArrowPreference(
+                title = "时间细线长度",
+                summary = "${cfg.timeLineLength} dp",
+                onClick = { onEditInt("时间细线长度", cfg.timeLineLength, "dp", false) { onUpdate(cfg.copy(timeLineLength = it)) } },
+            )
+        }
     }
 }
-
-private data class ChoiceItem(val label: String, val value: String)
 
 private sealed interface ConfigDialogState {
     data class IntInput(
@@ -794,13 +917,6 @@ private sealed interface ConfigDialogState {
         val suffix: String,
         val allowNegative: Boolean,
         val onConfirm: (Int) -> Unit,
-    ) : ConfigDialogState
-
-    data class Choice(
-        val title: String,
-        val selectedValue: String,
-        val options: List<ChoiceItem>,
-        val onConfirm: (String) -> Unit,
     ) : ConfigDialogState
 }
 
@@ -827,18 +943,6 @@ private fun ConfigDialogHost(
             onDismissFinished = { rendered = null },
             onConfirm = {
                 it.toIntOrNull()?.let(current.onConfirm)
-                onDismiss()
-            },
-        )
-        is ConfigDialogState.Choice -> ChoiceDialog(
-            show = show,
-            title = current.title,
-            selectedValue = current.selectedValue,
-            options = current.options,
-            onDismiss = onDismiss,
-            onDismissFinished = { rendered = null },
-            onSelect = {
-                current.onConfirm(it)
                 onDismiss()
             },
         )
@@ -889,59 +993,6 @@ private fun NumberInputDialog(
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.textButtonColorsPrimary(),
                 enabled = valid,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ChoiceDialog(
-    show: Boolean,
-    title: String,
-    selectedValue: String,
-    options: List<ChoiceItem>,
-    onDismiss: () -> Unit,
-    onDismissFinished: () -> Unit,
-    onSelect: (String) -> Unit,
-) {
-    OverlayDialog(
-        show = show,
-        title = title,
-        onDismissRequest = onDismiss,
-        onDismissFinished = onDismissFinished,
-    ) {
-        Column {
-            options.forEach { item ->
-                val selected = item.value == selectedValue
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(miuixShape(16.dp))
-                        .clickable { onSelect(item.value) }
-                        .padding(horizontal = 14.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = item.label,
-                        modifier = Modifier.weight(1f),
-                        color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    )
-                    if (selected) {
-                        Text(
-                            text = "✓",
-                            color = MiuixTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
-            }
-        }
-        Row(modifier = Modifier.padding(top = 12.dp)) {
-            TextButton(
-                text = "取消",
-                onClick = onDismiss,
-                modifier = Modifier.weight(1f),
             )
         }
     }

@@ -1,7 +1,7 @@
 {
-  "versionCode": 6,
-  "versionName": "1.0.1",
-  "changelog": "ZHITool 1.0.1 更新：\n新增「音乐律动」音频可视化背景，三种背景可选。\n新增「歌词律动」。\n新增「歌词发光」。\n重写并优化副句动画。\n说明：重装可能丢失部分配置；如果重装后无效请重启设备。",
+  "versionCode": 7,
+  "versionName": "1.0.2",
+  "changelog": "ZHITool 1.0.2 更新：\n修复重启后不能正常投到背屏的问题。\n优化 SuperLyric 兼容性，修复逐句歌词被误判为切歌。\nSuperLyric 与背屏通知统一通过 LSPosed 获取，不再需要通知使用权。\n背屏通知点击将打开对应通知页面。\n完善背屏保活、UI 交互、封面长按和背景音乐律动。\n安装后需要重启手机才能正常生效。",
   "apkUrl": "https://github.com/XZOWO/ZHITool/releases/latest/download/ZHITool-Release.apk",
   "releaseUrl": "https://github.com/XZOWO/ZHITool/releases/latest",
   "lyricon": {

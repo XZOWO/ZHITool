@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.zhitool.rearlyric.core.RearTools
 import com.zhitool.rearlyric.core.RootShell
@@ -40,6 +39,8 @@ import com.zhitool.rearlyric.tools.ToolsConfigStore
 import com.zhitool.rearlyric.tools.notify.NotifyConfigState
 import com.zhitool.rearlyric.tools.notify.NotifyConfigStore
 import com.zhitool.rearlyric.tools.record.ScreenRecordService
+import com.zhitool.rearlyric.ui.components.DropdownOption
+import com.zhitool.rearlyric.ui.components.DropdownPreference
 import com.zhitool.rearlyric.ui.components.NumberTextField
 import com.zhitool.rearlyric.ui.components.OverlayDialog
 import kotlin.concurrent.thread
@@ -94,13 +95,8 @@ fun ToolsScreen(contentPadding: PaddingValues) {
     LaunchedEffect(Unit) { reload() }
 
     var showDpiDialog by remember { mutableStateOf(false) }
-    var showRotationDialog by remember { mutableStateOf(false) }
     var showUriDialog by remember { mutableStateOf(false) }
     var showAutoSecDialog by remember { mutableStateOf(false) }
-    val notifyAccess = remember(notify.enabled, showNotifyPicker) {
-        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
-    }
-
     val scrollBehavior = MiuixScrollBehavior()
     Scaffold(
         topBar = { TopAppBar(title = "工具", scrollBehavior = scrollBehavior) },
@@ -175,10 +171,22 @@ fun ToolsScreen(contentPadding: PaddingValues) {
                             }
                         },
                     )
-                    ArrowPreference(
+                    DropdownPreference(
                         title = "背屏旋转",
                         summary = rotation?.let { rotationLabel(it) } ?: "0° / 90° / 180° / 270°",
-                        onClick = { showRotationDialog = true },
+                        selectedValue = rotation ?: 0,
+                        options = (0..3).map { DropdownOption(rotationLabel(it), it) },
+                        onSelected = { selectedRotation ->
+                            runTool(context, "正在旋转…") {
+                                val ok = RearTools.setRearRotation(selectedRotation)
+                                reload()
+                                if (ok) {
+                                    "背屏已旋转至 ${rotationLabel(selectedRotation)}"
+                                } else {
+                                    "旋转失败"
+                                }
+                            }
+                        },
                     )
                 }
             }
@@ -211,13 +219,14 @@ fun ToolsScreen(contentPadding: PaddingValues) {
                             RearToolsService.syncFromConfig(context)
                         },
                     )
-                    SwitchPreference(
-                        title = "充电动画常亮",
-                        summary = "充电期间一直显示（否则约 8 秒后消失）",
-                        checked = tools.chargeAlwaysOn,
-                        enabled = tools.chargeAnimation,
-                        onCheckedChange = { ToolsConfigStore.save(context, tools.copy(chargeAlwaysOn = it)) },
-                    )
+                    if (tools.chargeAnimation) {
+                        SwitchPreference(
+                            title = "充电动画常亮",
+                            summary = "充电期间一直显示（否则约 8 秒后消失）",
+                            checked = tools.chargeAlwaysOn,
+                            onCheckedChange = { ToolsConfigStore.save(context, tools.copy(chargeAlwaysOn = it)) },
+                        )
+                    }
                 }
             }
 
@@ -225,56 +234,48 @@ fun ToolsScreen(contentPadding: PaddingValues) {
             item { SmallTitle("背屏通知") }
             item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    ArrowPreference(
-                        title = "通知使用权",
-                        summary = if (notifyAccess) "已授予" else "未授予，点击前往开启",
-                        onClick = {
-                            context.startActivity(
-                                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        },
-                    )
                     SwitchPreference(
                         title = "背屏通知推送",
-                        summary = "收到选中应用的通知时在背屏显示",
+                        summary = "通过 LSPosed 获取选中应用通知，无需通知使用权",
                         checked = notify.enabled,
                         onCheckedChange = { NotifyConfigStore.save(context, notify.copy(enabled = it)) },
                     )
-                    ArrowPreference(
-                        title = "选择应用",
-                        summary = "已选 ${notify.selectedApps.size} 个",
-                        onClick = { showNotifyPicker = true },
-                    )
-                    SwitchPreference(
-                        title = "隐藏标题",
-                        summary = "隐私模式：不显示通知标题",
-                        checked = notify.hideTitle,
-                        onCheckedChange = { NotifyConfigStore.save(context, notify.copy(hideTitle = it)) },
-                    )
-                    SwitchPreference(
-                        title = "隐藏内容",
-                        summary = "隐私模式：不显示通知内容",
-                        checked = notify.hideContent,
-                        onCheckedChange = { NotifyConfigStore.save(context, notify.copy(hideContent = it)) },
-                    )
-                    SwitchPreference(
-                        title = "跟随系统勿扰",
-                        summary = "勿扰模式开启时不在背屏显示",
-                        checked = notify.followDnd,
-                        onCheckedChange = { NotifyConfigStore.save(context, notify.copy(followDnd = it)) },
-                    )
-                    SwitchPreference(
-                        title = "仅倒扣手机时",
-                        summary = "仅当主屏被遮盖（手机倒扣）时推送",
-                        checked = notify.onlyWhenUpsideDown,
-                        onCheckedChange = { NotifyConfigStore.save(context, notify.copy(onlyWhenUpsideDown = it)) },
-                    )
-                    ArrowPreference(
-                        title = "自动消失时间",
-                        summary = "${notify.autoDestroySeconds} 秒",
-                        onClick = { showAutoSecDialog = true },
-                    )
+                    if (notify.enabled) {
+                        ArrowPreference(
+                            title = "选择应用",
+                            summary = "已选 ${notify.selectedApps.size} 个",
+                            onClick = { showNotifyPicker = true },
+                        )
+                        SwitchPreference(
+                            title = "隐藏标题",
+                            summary = "隐私模式：不显示通知标题",
+                            checked = notify.hideTitle,
+                            onCheckedChange = { NotifyConfigStore.save(context, notify.copy(hideTitle = it)) },
+                        )
+                        SwitchPreference(
+                            title = "隐藏内容",
+                            summary = "隐私模式：不显示通知内容",
+                            checked = notify.hideContent,
+                            onCheckedChange = { NotifyConfigStore.save(context, notify.copy(hideContent = it)) },
+                        )
+                        SwitchPreference(
+                            title = "跟随系统勿扰",
+                            summary = "勿扰模式开启时不在背屏显示",
+                            checked = notify.followDnd,
+                            onCheckedChange = { NotifyConfigStore.save(context, notify.copy(followDnd = it)) },
+                        )
+                        SwitchPreference(
+                            title = "仅倒扣手机时",
+                            summary = "仅当主屏被遮盖（手机倒扣）时推送",
+                            checked = notify.onlyWhenUpsideDown,
+                            onCheckedChange = { NotifyConfigStore.save(context, notify.copy(onlyWhenUpsideDown = it)) },
+                        )
+                        ArrowPreference(
+                            title = "自动消失时间",
+                            summary = "${notify.autoDestroySeconds} 秒",
+                            onClick = { showAutoSecDialog = true },
+                        )
+                    }
                 }
             }
 
@@ -313,23 +314,55 @@ fun ToolsScreen(contentPadding: PaddingValues) {
             }
 
             // ── 背屏保活（系统 Hook，从配置页迁来） ──
-            item { SmallTitle("背屏保活（需 LSPosed 启用本模块）") }
+            item { SmallTitle("系统级背屏保活（需 LSPosed，修改后重启生效）") }
             item {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
                     SwitchPreference(
-                        title = "锁屏背屏不返回桌面",
-                        summary = "息屏时阻止系统把背屏切回桌面，投放页/歌词页保持前台",
+                        title = "允许 ZHITool 在背屏启动",
+                        summary = "加入系统背屏 Activity 白名单，锁屏状态也允许启动",
+                        checked = hookState.allowRearActivity,
+                        onCheckedChange = {
+                            HookSettings.save(context, hookState.copy(allowRearActivity = it))
+                        },
+                    )
+                    SwitchPreference(
+                        title = "锁屏过渡不返回桌面",
+                        summary = "拦截系统锁屏过渡的返回桌面动作（全局影响，默认关闭）",
+                        checked = hookState.skipLockBackHome,
+                        onCheckedChange = {
+                            HookSettings.save(context, hookState.copy(skipLockBackHome = it))
+                        },
+                    )
+                    SwitchPreference(
+                        title = "锁屏后保持当前背屏页面",
+                        summary = "AOD/息屏时仅阻止 ZHITool 被切回背屏桌面",
                         checked = hookState.guardSubScreenHome,
                         onCheckedChange = {
                             HookSettings.save(context, hookState.copy(guardSubScreenHome = it))
                         },
                     )
                     SwitchPreference(
-                        title = "后台保活",
-                        summary = "把本应用注入系统动态白名单，降低被后台清理概率",
+                        title = "禁用 ZHITool 双击息屏",
+                        summary = "ZHITool 位于背屏前台时，屏蔽系统双击息屏手势",
+                        checked = hookState.disableDoubleTapSleep,
+                        onCheckedChange = {
+                            HookSettings.save(context, hookState.copy(disableDoubleTapSleep = it))
+                        },
+                    )
+                    SwitchPreference(
+                        title = "后台白名单与进程锁定",
+                        summary = "注入系统动态白名单并锁定应用，降低后台被清理概率",
                         checked = hookState.keepBackground,
                         onCheckedChange = {
                             HookSettings.save(context, hookState.copy(keepBackground = it))
+                        },
+                    )
+                    SwitchPreference(
+                        title = "禁用背屏保护",
+                        summary = "阻止系统显示背屏保护层（全局影响，默认关闭）",
+                        checked = hookState.disableRearScreenCover,
+                        onCheckedChange = {
+                            HookSettings.save(context, hookState.copy(disableRearScreenCover = it))
                         },
                     )
                 }
@@ -365,21 +398,6 @@ fun ToolsScreen(contentPadding: PaddingValues) {
                         reload()
                         if (ok) "背屏 DPI 已设为 $value" else "设置失败"
                     }
-                }
-            },
-        )
-    }
-
-    if (showRotationDialog) {
-        RotationDialog(
-            current = rotation ?: 0,
-            onDismiss = { showRotationDialog = false },
-            onSelect = { r ->
-                showRotationDialog = false
-                runTool(context, "正在旋转…") {
-                    val ok = RearTools.setRearRotation(r)
-                    reload()
-                    if (ok) "背屏已旋转至 ${rotationLabel(r)}" else "旋转失败"
                 }
             },
         )
@@ -462,45 +480,6 @@ private fun NumberDialog(
                 colors = ButtonDefaults.textButtonColorsPrimary(),
                 enabled = valid,
             )
-        }
-    }
-}
-
-@Composable
-private fun RotationDialog(
-    current: Int,
-    onDismiss: () -> Unit,
-    onSelect: (Int) -> Unit,
-) {
-    OverlayDialog(show = true, title = "背屏旋转", onDismissRequest = onDismiss) {
-        Column {
-            (0..3).forEach { r ->
-                val selected = r == current
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp)
-                        .height(48.dp),
-                ) {
-                    if (selected) {
-                        TextButton(
-                            text = rotationLabel(r) + "  ✓",
-                            onClick = { onSelect(r) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.textButtonColorsPrimary(),
-                        )
-                    } else {
-                        TextButton(
-                            text = rotationLabel(r),
-                            onClick = { onSelect(r) },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-            }
-        }
-        Row(modifier = Modifier.padding(top = 8.dp)) {
-            TextButton(text = "取消", onClick = onDismiss, modifier = Modifier.weight(1f))
         }
     }
 }

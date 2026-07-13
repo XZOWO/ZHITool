@@ -25,6 +25,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -32,6 +33,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -39,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -87,13 +90,18 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,10 +118,13 @@ import com.zhitool.rearlyric.lyric.LyricColors
 import com.zhitool.rearlyric.lyric.LyricFrameRate
 import com.zhitool.rearlyric.lyric.LyricSource
 import com.zhitool.rearlyric.lyric.LyricSourceState
+import com.zhitool.rearlyric.lyric.LyricStyleMode
+import com.zhitool.rearlyric.lyric.LyricStyleState
 import com.zhitool.rearlyric.lyric.PackageStyleState
 import com.zhitool.rearlyric.lyric.RearBackground
 import com.zhitool.rearlyric.lyric.RearConfigState
 import com.zhitool.rearlyric.lyric.RhythmDecay
+import com.zhitool.rearlyric.lyric.StaggerConfigState
 import com.zhitool.rearlyric.lyric.TextColorMode
 import com.zhitool.rearlyric.tools.audio.AudioVisualizer
 import com.zhitool.rearlyric.tools.charge.LiquidFillView
@@ -123,6 +134,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -237,6 +249,13 @@ class RearLyricActivity : ComponentActivity() {
 
 @Composable
 private fun RearLyricScreen() {
+    // 歌词样式分支：错位交替走独立的纯净渲染（星空 + 两句歌词），不组合默认样式的任何界面元素。
+    val lyricStyle by LyricStyleState.flow.collectAsState()
+    if (lyricStyle == LyricStyleMode.STAGGER_ALTERNATE) {
+        StaggerRearScreen()
+        return
+    }
+
     val baseCfg by RearConfigState.flow.collectAsState()
     val packageStyles by PackageStyleState.flow.collectAsState()
     val song by LyricBus.songFlow.collectAsState()
@@ -249,7 +268,7 @@ private fun RearLyricScreen() {
     }
     val cfg = packageStyles[playerPackage]?.config ?: baseCfg
 
-    // 全量模式：点封面放大成控制面板（收藏/切歌/暂停 + “词”返回，不自动返回）。
+    // 全量模式：长按封面 1 秒打开控制面板；展开态点大封面返回歌词。
     var coverPanelExpanded by remember { mutableStateOf(false) }
     // 拖动调整进度：FullLyricView 上报「正中那句」的时间，在此全屏层把时间画到歌词左侧
     // （可溢出到左侧摄像头空隙——FullLyricView 自身只占右 2/3 画不到那里）。
@@ -261,10 +280,29 @@ private fun RearLyricScreen() {
     var lockRingAlpha by remember { mutableFloatStateOf(0f) }
     var lockOpen by remember { mutableFloatStateOf(0f) }
     var lockAlpha by remember { mutableFloatStateOf(0f) }
+    // 默认模式仍只有封面命中才启动长按；可视反馈则改由 Compose 与错位模式共用。
+    var coverHolding by remember { mutableStateOf(false) }
+    var coverHoldProgress by remember { mutableFloatStateOf(0f) }
+    var coverHintVisible by remember { mutableStateOf(false) }
+    var coverHintTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(coverHintTick) {
+        if (coverHintTick == 0) return@LaunchedEffect
+        coverHintVisible = true
+        delay(REAR_PANEL_HINT_MS)
+        coverHintVisible = false
+    }
+    // 面板空闲计时：任意触摸按下即暂停，抬起后从零重计；完全展开后才开始 5 秒倒计时。
+    var panelInteractionTick by remember { mutableIntStateOf(0) }
+    var panelTouchActive by remember { mutableStateOf(false) }
     // 控制面板「音量」按钮：点击后进度条变成音量条；1.5s 未触控自动还原成进度条。
     var volumeMode by remember { mutableStateOf(false) }
     var volumeTick by remember { mutableStateOf(0) }
-    LaunchedEffect(coverPanelExpanded) { if (!coverPanelExpanded) volumeMode = false }
+    LaunchedEffect(coverPanelExpanded) {
+        if (!coverPanelExpanded) {
+            volumeMode = false
+            panelTouchActive = false
+        }
+    }
     LaunchedEffect(volumeMode, volumeTick) { if (volumeMode) { delay(1500); volumeMode = false } }
     // 面板展开进度（0=收起，1=展开）：同时驱动 FullLyricView 的封面放大/歌词淡出、黑底淡入、按键升起。
     // 时长与 dock 放大动画接近，整体观感一致。
@@ -272,6 +310,13 @@ private fun RearLyricScreen() {
         targetValue = if (coverPanelExpanded) 1f else 0f,
         animationSpec = tween(durationMillis = 560, easing = FastOutSlowInEasing),
         label = "coverPanelProgress",
+    )
+    PanelAutoHideEffect(
+        expanded = coverPanelExpanded,
+        progress = panelProgress,
+        interactionTick = panelInteractionTick,
+        touchActive = panelTouchActive,
+        onHide = { coverPanelExpanded = false },
     )
 
     // 文字取色与背景取色解耦：任一需要封面色就提取；背景取色关闭时背景用默认深色，文字仍可用封面色。
@@ -371,12 +416,24 @@ private fun RearLyricScreen() {
     val glowGain = (cfg.lyricGlowIntensity / 100f).coerceIn(0f, 3f)
     // motion 只在歌词律动或空间律动开时才有值；glow 只在歌词发光开时才有值（下游按各自开关再门控一次）。
     val motionActive = cfg.lyricRhythm || cfg.controlRhythm
-    val motionPerc = if (motionActive) (percBase * uiGain).coerceIn(0f, 1f) else 0f
-    val motionHarm = if (motionActive) (harmBase * uiGain).coerceIn(0f, 1f) else 0f
-    val glowPerc = if (cfg.lyricGlow) (percBase * glowGain).coerceIn(0f, 1f) else 0f
-    val glowHarm = if (cfg.lyricGlow) (harmBase * glowGain).coerceIn(0f, 1f) else 0f
+    // 所有用户增益之后统一进软肩：普通歌 0..0.55 完全保留原手感，复杂/大音量段继续变化而不硬贴 1。
+    val motionPerc = if (motionActive) softRhythmEnergy(percBase * uiGain) else 0f
+    val motionHarm = if (motionActive) softRhythmEnergy(harmBase * uiGain) else 0f
+    val glowPerc = if (cfg.lyricGlow) softRhythmEnergy(percBase * glowGain) else 0f
+    val glowHarm = if (cfg.lyricGlow) softRhythmEnergy(harmBase * glowGain) else 0f
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(coverPanelExpanded) {
+                if (coverPanelExpanded) {
+                    observePanelTouches(
+                        onPressedChange = { pressed -> panelTouchActive = pressed },
+                        onInteraction = { panelInteractionTick++ },
+                    )
+                }
+            },
+    ) {
         RearBackgroundLayer(
             colors = bgColors,
             mode = cfg.background,
@@ -431,6 +488,12 @@ private fun RearLyricScreen() {
                 factory = { ctx ->
                     FullLyricView(ctx).apply {
                         onCoverTap = { coverPanelExpanded = !coverPanelExpanded }
+                        onCoverHoldVisual = { holding, progress ->
+                            coverHolding = holding
+                            coverHoldProgress = progress
+                            if (holding) coverHintVisible = false
+                        }
+                        onCoverShortTap = { coverHintTick++ }
                         onScrubChange = { active, t ->
                             scrubActive = active
                             scrubTimeMs = t
@@ -471,6 +534,15 @@ private fun RearLyricScreen() {
                 },
             )
         }
+
+        PanelLongPressHint(
+            visible = !coverPanelExpanded && (coverHolding || coverHintVisible),
+            progress = if (coverHolding) coverHoldProgress else 0f,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .fillMaxWidth(2f / 3f)
+                .padding(bottom = 24.dp),
+        )
 
         // 背屏通知覆盖层：歌词上方弹胶囊（图标+N条新通知），点击就地铺满成胶囊页，不跳转。
         com.zhitool.rearlyric.tools.notify.RearNotifyOverlay(modifier = Modifier.fillMaxSize())
@@ -600,6 +672,427 @@ private fun RearLyricScreen() {
         }
     }
 }
+
+/**
+ * 「错位交替」样式的背屏页（纯净模式）：流动星空背景 + 当前句/上一句错落漂浮歌词 + 右上角时钟
+ * （可开关）。样式配置走独立的 [StaggerConfigState]（与默认样式/包级配置不通用）；基础 [RearConfigState]
+ * 只借用安全区微调/帧率/律动增益等设备级参数。严格长按整页 1 秒打开封面页（大封面 + 进度条 + 控制键），
+ * 开合动画与切句同款"后退"语言：歌词舞台向中心收拢缩小压暗、封面从身后（1.12 倍）落到面前，
+ * 星空同步收到后退脉冲。切句时歌词飞向随机远点、星空以该点为消失点收敛——歌词动星星才动。
+ */
+@Composable
+private fun StaggerRearScreen() {
+    val baseCfg by RearConfigState.flow.collectAsState()
+    val staggerCfg by StaggerConfigState.flow.collectAsState()
+    val song by LyricBus.songFlow.collectAsState()
+    val cover by LyricBus.cover.collectAsState()
+    val playing by LyricBus.playingFlow.collectAsState()
+    val playerPackage by LyricBus.playerPackage.collectAsState()
+    val lyricSource by LyricSourceState.flow.collectAsState()
+    val rearDisplayInfo by produceState(RearDisplayHelper.getRearDisplayInfo(), Unit) {
+        value = withContext(Dispatchers.Default) { RearDisplayHelper.getRearDisplayInfo(forceRefresh = true) }
+    }
+
+    val currentPosition by produceState(0L, baseCfg.frameRate, playing) {
+        val frameIntervalNanos = when (baseCfg.frameRate) {
+            LyricFrameRate.FPS_120 -> 1_000_000_000L / 120L
+            LyricFrameRate.FPS_60 -> 1_000_000_000L / 60L
+        }
+        var lastFrameNanos = 0L
+        while (true) {
+            withFrameNanos { frameTimeNanos ->
+                // 心跳：息屏把 Activity stop 后帧时钟暂停、心跳停更，LyricService 据此自愈重投。
+                LyricBus.markFrame()
+                if (lastFrameNanos == 0L || frameTimeNanos - lastFrameNanos >= frameIntervalNanos) {
+                    value = LyricBus.currentPosition()
+                    lastFrameNanos = frameTimeNanos
+                }
+            }
+        }
+    }
+
+    // 歌词发光能量：链路与默认样式相同（root 内录 + 低音/非低音增益），开关与强度走星空独立配置。
+    val rhythmEnergy = rememberRhythmEnergy(active = staggerCfg.lyricGlow, decay = baseCfg.uiRhythmDecay)
+    val glowGain = (staggerCfg.lyricGlowIntensity / 100f).coerceIn(0f, 3f)
+    val glowPerc = if (staggerCfg.lyricGlow) {
+        softRhythmEnergy(rhythmEnergy.perc * (baseCfg.glowPercGain / 100f) * glowGain)
+    } else {
+        0f
+    }
+    val glowHarm = if (staggerCfg.lyricGlow) {
+        softRhythmEnergy(rhythmEnergy.harm * (baseCfg.glowHarmGain / 100f) * glowGain)
+    } else {
+        0f
+    }
+
+    // 封面页（整页长按 1 秒打开）：面板进度驱动歌词舞台后退 + 黑底 + 封面/进度条/按键浮现。
+    var coverPanelExpanded by remember { mutableStateOf(false) }
+    val panelProgress by animateFloatAsState(
+        targetValue = if (coverPanelExpanded) 1f else 0f,
+        animationSpec = tween(durationMillis = 560, easing = FastOutSlowInEasing),
+        label = "staggerPanelProgress",
+    )
+    var volumeMode by remember { mutableStateOf(false) }
+    var volumeTick by remember { mutableStateOf(0) }
+    var panelInteractionTick by remember { mutableIntStateOf(0) }
+    var panelTouchActive by remember { mutableStateOf(false) }
+    LaunchedEffect(coverPanelExpanded) {
+        if (!coverPanelExpanded) {
+            volumeMode = false
+            panelTouchActive = false
+        }
+    }
+    LaunchedEffect(volumeMode, volumeTick) { if (volumeMode) { delay(1500); volumeMode = false } }
+    PanelAutoHideEffect(
+        expanded = coverPanelExpanded,
+        progress = panelProgress,
+        interactionTick = panelInteractionTick,
+        touchActive = panelTouchActive,
+        onHide = { coverPanelExpanded = false },
+    )
+
+    // 收起态整页手势：短按只提示，按满统一的 1000ms 才打开；提示胶囊背景同步显示真实进度。
+    var pageHolding by remember { mutableStateOf(false) }
+    var pageHintVisible by remember { mutableStateOf(false) }
+    var pageHintTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(pageHintTick) {
+        if (pageHintTick == 0) return@LaunchedEffect
+        pageHintVisible = true
+        delay(REAR_PANEL_HINT_MS)
+        pageHintVisible = false
+    }
+    val pageHoldProgress by animateFloatAsState(
+        targetValue = if (pageHolding) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (pageHolding) REAR_LONG_PRESS_MS.toInt() else 0,
+            easing = LinearEasing,
+        ),
+        label = "staggerCoverHoldProgress",
+    )
+
+    // 星空联动：切句 / 开合封面页时发脉冲，其余时间星星只漂浮闪烁不动。
+    // 开封面页=后退（歌词星星一起变远）；关封面页=前进（一起变近），不是再变远。
+    val starMotion = remember { StarMotion() }
+    var panelPulseArmed by remember { mutableStateOf(false) }
+    LaunchedEffect(coverPanelExpanded) {
+        if (!panelPulseArmed) {
+            panelPulseArmed = true
+        } else {
+            starMotion.pulse(0.55f, 0.5f, 560L, forward = !coverPanelExpanded)
+        }
+    }
+
+    val coverBitmap by produceState<ImageBitmap?>(null, cover) {
+        value = cover?.let {
+            runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull()
+        }
+    }
+
+    val density = LocalDensity.current
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(coverPanelExpanded) {
+                if (!coverPanelExpanded) {
+                    detectTapGestures(
+                        onPress = {
+                            pageHintVisible = false
+                            pageHolding = true
+                            val released = withTimeoutOrNull(REAR_LONG_PRESS_MS) { tryAwaitRelease() }
+                            pageHolding = false
+                            when (released) {
+                                null -> coverPanelExpanded = true
+                                true -> pageHintTick++
+                                false -> Unit // 移出/被子控件消费：取消，不显示短按提示。
+                            }
+                        },
+                    )
+                }
+            }
+            .pointerInput(coverPanelExpanded) {
+                if (coverPanelExpanded) {
+                    observePanelTouches(
+                        onPressedChange = { pressed -> panelTouchActive = pressed },
+                        onInteraction = { panelInteractionTick++ },
+                    )
+                }
+            },
+    ) {
+        StarFieldBackground(motion = starMotion, modifier = Modifier.fillMaxSize())
+
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            // 安全区与默认样式一致：视图占右侧内容区，避开左 1/3 摄像头模组与挖孔。
+            val viewLeftEdge = lyricLeftEdgeDp(maxWidth, baseCfg.safeAreaLeft)
+            val contentWidth = maxWidth - viewLeftEdge
+            val padLeftPx = with(density) { 18.dp.roundToPx() }
+            val padTopPx = rearDisplayInfo.cutout.top + with(density) { 22.dp.roundToPx() }
+            val safeStepPx = with(density) { 1.dp.roundToPx() }
+            val padRightPx = ((rearDisplayInfo.cutout.right / 2) + with(density) { (11 + 6).dp.roundToPx() } - (baseCfg.safeAreaRight + 6) * safeStepPx).coerceAtLeast(0)
+            val padBottomPx = rearDisplayInfo.cutout.bottom + with(density) { 22.dp.roundToPx() }
+            // 歌词视图 → 全屏坐标换算（星空消失点用全屏归一坐标）。
+            val screenWPx = with(density) { maxWidth.toPx() }
+            val screenHPx = with(density) { maxHeight.toPx() }
+            val viewLeftPx = with(density) { viewLeftEdge.toPx() }
+            AndroidView(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(contentWidth)
+                    .fillMaxHeight(),
+                factory = { ctx -> StaggerLyricView(ctx) },
+                update = { view ->
+                    view.setPadding(padLeftPx, padTopPx, padRightPx, padBottomPx)
+                    view.onRecedePulse = { vx, vy, dur ->
+                        starMotion.pulse((viewLeftPx + vx) / screenWPx, vy / screenHPx, dur)
+                    }
+                    view.setPanelProgress(panelProgress)
+                    view.setAudioEnergy(glowPerc, glowHarm, staggerCfg.lyricGlow)
+                    view.bind(
+                        song = song,
+                        positionMs = currentPosition,
+                        config = staggerCfg,
+                        playing = playing,
+                        singleLine = lyricSource == LyricSource.SUPERLYRIC,
+                    )
+                },
+            )
+        }
+
+        PanelLongPressHint(
+            visible = !coverPanelExpanded && (pageHolding || pageHintVisible),
+            progress = if (pageHolding) pageHoldProgress else 0f,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .fillMaxWidth(2f / 3f)
+                .padding(bottom = 24.dp),
+        )
+
+        // 封面页暗底：压暗星空与后退中的歌词，封面/进度条/按键叠其上。
+        if (panelProgress > 0.001f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.55f * panelProgress))
+            )
+        }
+
+        // 封面页主体：左圆形转动封面 + 右歌名/歌手（排版同默认样式引导卡），
+        // 从身后（1.12 倍）落到面前 —— 与歌词切句同款后退语言。
+        StaggerCoverPanel(
+            progress = panelProgress,
+            coverBitmap = coverBitmap,
+            title = song?.name.orEmpty().ifBlank { "未知歌曲" },
+            artist = song?.artist.orEmpty().ifBlank { "未知歌手" },
+            playing = playing,
+            onCoverClick = { coverPanelExpanded = false },
+        )
+
+        // 进度条层与控制按键层：复用默认样式的控制面板组件（进度/时长/seek/音量、切歌/暂停/收藏）。
+        CoverPanelProgress(
+            progress = panelProgress,
+            positionMs = currentPosition,
+            playerPackage = playerPackage,
+            volumeMode = volumeMode,
+            onVolumeInteract = { volumeTick++ },
+        )
+        CoverPanelControls(
+            expanded = coverPanelExpanded,
+            progress = panelProgress,
+            playing = playing,
+            playerPackage = playerPackage,
+            onVolume = { volumeMode = true; volumeTick++ },
+        )
+
+        // 背屏通知覆盖层：歌词上方弹胶囊，点击就地铺满成胶囊页（基础设施，纯净模式保留）。
+        com.zhitool.rearlyric.tools.notify.RearNotifyOverlay(modifier = Modifier.fillMaxSize())
+
+        // 紧急关闭按钮：误投正面屏时可点（正常投背屏被摄像头模组遮挡）。
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth(1f / 3f)
+                .fillMaxHeight(0.5f),
+            contentAlignment = Alignment.Center,
+        ) {
+            EmergencyCloseButton()
+        }
+    }
+}
+
+/**
+ * 星空封面页主体：排版同默认样式引导卡——左=**圆形转动封面**（定死，不随任何配置；16s/圈、
+ * 播放中才转、暂停保持角度），右=歌名/歌手；进度条与控制键在下方（复用默认组件）。
+ * 进场 = 从身后（1.12 倍、透明）非线性落到面前，退场反向——与歌词后退动画同一运动语言。
+ */
+@Composable
+private fun StaggerCoverPanel(
+    progress: Float,
+    coverBitmap: ImageBitmap?,
+    title: String,
+    artist: String,
+    playing: Boolean,
+    onCoverClick: () -> Unit,
+) {
+    if (progress <= 0.001f) return
+    // 圆形转动封面：匀速 16s/圈（与默认样式一致），播放中才转、暂停停转保持角度。
+    var coverAngle by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(playing) {
+        if (!playing) return@LaunchedEffect
+        var last = 0L
+        while (true) {
+            withFrameNanos { frame ->
+                if (last != 0L) {
+                    coverAngle = (coverAngle + (frame - last) / 1e9f * (360f / COVER_ROTATE_SECONDS)) % 360f
+                }
+                last = frame
+            }
+        }
+    }
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // 与默认引导卡同构：内容区=右 2/3（避开左 1/3 摄像头），封面占内容宽约 0.27。
+        val regionLeft = maxWidth / 3f
+        val rowW = maxWidth * (2f / 3f) - 32.dp
+        val coverSize = (rowW * 0.30f).coerceIn(70.dp, 116.dp).coerceAtMost(maxHeight * 0.40f)
+        Row(
+            modifier = Modifier
+                .offset(x = regionLeft + 16.dp, y = maxHeight * 0.14f)
+                .width(rowW)
+                .graphicsLayer {
+                    alpha = progress
+                    val s = 1.12f - 0.12f * progress
+                    scaleX = s
+                    scaleY = s
+                },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // 展开态点大封面直接返回歌词；无封面时占位圆同样保留关闭入口。
+            Box(
+                modifier = Modifier
+                    .size(coverSize)
+                    .clip(CircleShape)
+                    .clickable(onClick = onCoverClick),
+            ) {
+                if (coverBitmap != null) {
+                    Image(
+                        bitmap = coverBitmap,
+                        contentDescription = "关闭控制页",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { rotationZ = coverAngle },
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.White.copy(alpha = 0.10f)),
+                    )
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), blurRadius = 8f)),
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = artist,
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), blurRadius = 8f)),
+                )
+            }
+        }
+    }
+}
+
+/** 两种歌词模式共用的长按提示：位置、尺寸与进度填充完全一致。 */
+@Composable
+private fun PanelLongPressHint(
+    visible: Boolean,
+    progress: Float,
+    modifier: Modifier = Modifier,
+) {
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(durationMillis = if (visible) 150 else 320),
+        label = "panelLongPressHintAlpha",
+    )
+    if (alpha <= 0.001f) return
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .graphicsLayer { this.alpha = alpha }
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.59f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        scaleX = progress.coerceIn(0f, 1f)
+                        transformOrigin = TransformOrigin(0f, 0.5f)
+                    }
+                    .background(Color.White.copy(alpha = 0.36f)),
+            )
+            Text(
+                text = REAR_PANEL_HINT_TEXT,
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            )
+        }
+    }
+}
+
+/** 面板动画完全到 1 后才计时；任何触摸按下会暂停，抬起或下一次交互均从 5 秒重新开始。 */
+@Composable
+private fun PanelAutoHideEffect(
+    expanded: Boolean,
+    progress: Float,
+    interactionTick: Int,
+    touchActive: Boolean,
+    onHide: () -> Unit,
+) {
+    val latestOnHide by rememberUpdatedState(onHide)
+    val fullyExpanded = expanded && progress >= 0.999f
+    LaunchedEffect(fullyExpanded, interactionTick, touchActive) {
+        if (!fullyExpanded || touchActive) return@LaunchedEffect
+        delay(REAR_PANEL_IDLE_HIDE_MS)
+        latestOnHide()
+    }
+}
+
+/** 在父层 Initial pass 旁观所有子控件触摸，不消费事件；用于统一暂停/重置面板空闲计时。 */
+private suspend fun PointerInputScope.observePanelTouches(
+    onPressedChange: (Boolean) -> Unit,
+    onInteraction: () -> Unit,
+) {
+    awaitPointerEventScope {
+        var pressed = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val nowPressed = event.changes.any { it.pressed }
+            if (nowPressed != pressed) {
+                pressed = nowPressed
+                onPressedChange(pressed)
+                onInteraction()
+            }
+        }
+    }
+}
+
+/** 星空封面页的圆形封面转速（秒/圈，与默认样式一致）。 */
+private const val COVER_ROTATE_SECONDS = 16f
 
 /**
  * 控制面板进度条层：大封面与按键之间，左=当前时间 / 中=可拖动进度条 / 右=歌曲总时长。
@@ -1127,11 +1620,13 @@ private fun RearBackgroundLayer(
             }
 
             RearBackground.PULSE -> {
+                // 与默认背景共用封面底色，但静态高光略暗；静音/小音量时也不会退成近乎纯黑。
+                drawDriftHighlight(highlight, 0.14f, drift)
                 // 两团高光由 HPSS（谐波-打击分离）驱动，各取封面一色（不同色，不分深浅）、随能量明暗、在背景里流动：
                 //  · 动次打次(打击分量) → 大团（像第一版那么大）
                 //  · 人声/其它(谐波分量) → 正常大小
-                val percE = (grp[0] * gain * percGain).coerceIn(0f, 1f)
-                val harmE = (grp[1] * gain * harmGain).coerceIn(0f, 1f)
+                val percE = softRhythmEnergy(grp[0] * gain * percGain)
+                val harmE = softRhythmEnergy(grp[1] * gain * harmGain)
                 val a = phaseA * (2f * PI.toFloat())
                 val b = phaseB * (2f * PI.toFloat())
                 drawBandGlow(glowColors[0], percE, 0.46f + 0.22f * cos(a), 0.58f + 0.16f * sin(b), 0.50f, 0.32f)        // 动次打次:大团
@@ -1165,7 +1660,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBandGlow(
     gainR: Float,
 ) {
     val e = energy.coerceIn(0f, 1f)
-    val alpha = 0.07f + e * 0.55f
+    // 软肩会为强段留出余量；同步提高发光斜率，使普通与强段都比旧两团更亮。
+    val alpha = 0.05f + e * 0.72f
     drawRect(
         Brush.radialGradient(
             colors = listOf(color.copy(alpha = alpha), Color.Transparent),
@@ -1370,4 +1866,3 @@ private fun BatteryBadge(level: Int, charging: Boolean, showBolt: Boolean, modif
         }
     }
 }
-

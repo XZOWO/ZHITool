@@ -22,6 +22,7 @@ import com.zhitool.rearlyric.R
 import com.zhitool.rearlyric.core.RootShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -60,6 +61,13 @@ class LyricService : Service() {
 
     /** 观察投放主开关与投放状态：据此收回/重投 + 刷新通知按钮。 */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** 开机/进程重建后的 Root 探测独立于投影队列，并发触发时只保留一份。 */
+    private val rootInitLock = Any()
+    private var rootInitJob: Job? = null
+
+    /** SuperLyric 每句都会重建 Song；只让真正变化的会话 id 触发一次自动投放。 */
+    private var lastAutoProjectedSuperSongId: String? = null
 
     @Volatile
     private var currentPlayerPackage: String? = null
@@ -118,7 +126,7 @@ class LyricService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != CoverStorage.ACTION_COVER_UPDATED) return
             val pkg = intent.getStringExtra(CoverStorage.EXTRA_PACKAGE) ?: return
-            if (pkg != currentPlayerPackage) return
+            if (pkg != activePlayerPackage()) return
             val bytes = intent.getByteArrayExtra(CoverStorage.EXTRA_COVER)
             if (bytes != null && bytes.isNotEmpty()) {
                 LyricBus.setCover(bytes)
@@ -173,6 +181,8 @@ class LyricService : Service() {
         _running.value = true
         ForegroundCoordinator.started(ForegroundCoordinator.TAG_LYRIC)
         startForeground(SHARED_NOTIF_ID, buildSharedNotification(this))
+        // MainActivity 不一定会在开机/进程重建后出现，不能再依赖它独占 Root 初始化。
+        ensureRootReady("service-create")
         applyLyricSource(LyricSourceState.current)
         // 歌词数据源切换（词幕 ↔ SuperLyric）：启停对应来源并清空旧数据。
         serviceScope.launch {
@@ -181,7 +191,15 @@ class LyricService : Service() {
         // SuperLyric 源是直接写 LyricBus.song（无词幕 onSongChanged），这里据歌曲出现触发自动投放。
         serviceScope.launch {
             LyricBus.songFlow.collect { song ->
-                if (LyricSourceState.current == LyricSource.SUPERLYRIC && song != null) maybeAutoProject("superlyric")
+                if (LyricSourceState.current == LyricSource.SUPERLYRIC && song != null) {
+                    val songId = song.id?.takeIf { it.isNotBlank() }
+                    if (songId != lastAutoProjectedSuperSongId) {
+                        lastAutoProjectedSuperSongId = songId
+                        maybeAutoProject("superlyric-song")
+                    }
+                } else if (song == null) {
+                    lastAutoProjectedSuperSongId = null
+                }
             }
         }
         registerReceiver(
@@ -215,14 +233,15 @@ class LyricService : Service() {
         }
         // 自己掌握播放进度：周期性从系统会话直读进度+播放态喂给 LyricBus，独立于词幕的进度上报。
         // 词幕只管提供整首逐字歌词；进度由我们读 → 词幕断了/不报进度时歌词仍实时跟着跑（不再靠改版词幕）。
-        var lastSuperTitle: String? = null
+        var lastSuperSongKey: String? = null
         serviceScope.launch {
             while (true) {
                 val src = LyricSourceState.current
+                val sessionPackage = activePlayerPackage()
                 if (src == LyricSource.SUPERLYRIC) {
                     // SuperLyric 源：进度 + 歌名/歌手/封面都从系统会话取（权威、随切歌可靠变、进度真实可 seek）。
                     val pb = withContext(Dispatchers.Default) {
-                        MediaControl.readPlayback(this@LyricService, currentPlayerPackage)
+                        MediaControl.readPlayback(this@LyricService, sessionPackage)
                     }
                     if (pb != null) {
                         LyricBus.setPosition(pb.positionMs)
@@ -230,28 +249,29 @@ class LyricService : Service() {
                         lastSessionPlaybackAt = SystemClock.elapsedRealtime()
                     }
                     val meta = withContext(Dispatchers.Default) {
-                        MediaControl.readMetadata(this@LyricService, currentPlayerPackage, withCover = false)
+                        MediaControl.readMetadata(this@LyricService, sessionPackage)
                     }
-                    // QQ音乐/网易云 等出歌词后会把当前句歌词塞进 TITLE、歌手区变「歌名 - 歌手」；
-                    // 先归一化出真正歌名/歌手（一首歌内稳定），否则每句都被误判成切歌、歌词出不来。
-                    val (realTitle, realArtist) = SuperLyricSource.resolveMeta(meta?.title, meta?.artist)
-                    // 真正歌名变（切歌）才读封面（避免每轮/每句压缩位图）。
-                    if (realTitle != lastSuperTitle) {
-                        lastSuperTitle = realTitle
-                        val cov = withContext(Dispatchers.Default) {
-                            MediaControl.readMetadata(this@LyricService, currentPlayerPackage, withCover = true)?.coverBytes
+                    // QQ/小米歌词态会把 TITLE 变成当前句、ARTIST 变成「歌名-歌手」；
+                    // 由状态化归一化器提交稳定显示信息和完整歌曲身份，逐句 TITLE 不再触发换歌。
+                    val normalized = SuperLyricSource.onMediaMeta(meta?.title, meta?.artist)
+                    // 完整歌名+歌手身份变化才向 SystemUI hook 请求封面；同名不同歌手也能正确刷新。
+                    val normalizedKey = normalized?.songKey
+                    if (normalizedKey != null && normalizedKey != lastSuperSongKey) {
+                        lastSuperSongKey = normalizedKey
+                        requestCoverFromHook(sessionPackage)
+                        refreshCover(retry = true)
+                    }
+                } else {
+                    lastSuperSongKey = null
+                    if (LyricBus.song.value != null) {
+                        val pb = withContext(Dispatchers.Default) {
+                            MediaControl.readPlayback(this@LyricService, sessionPackage)
                         }
-                        if (cov != null) LyricBus.setCover(cov)
-                    }
-                    SuperLyricSource.onMeta(realTitle, realArtist)
-                } else if (LyricBus.song.value != null) {
-                    val pb = withContext(Dispatchers.Default) {
-                        MediaControl.readPlayback(this@LyricService, currentPlayerPackage)
-                    }
-                    if (pb != null) {
-                        LyricBus.setPosition(pb.positionMs)
-                        if (LyricBus.playing.value != pb.playing) LyricBus.playing.value = pb.playing
-                        lastSessionPlaybackAt = SystemClock.elapsedRealtime()
+                        if (pb != null) {
+                            LyricBus.setPosition(pb.positionMs)
+                            if (LyricBus.playing.value != pb.playing) LyricBus.playing.value = pb.playing
+                            lastSessionPlaybackAt = SystemClock.elapsedRealtime()
+                        }
                     }
                 }
                 delay(SESSION_POS_POLL_MS)
@@ -267,6 +287,33 @@ class LyricService : Service() {
         }
         wakeLoopRunning = true
         wakeHandler.post(wakeRunnable)
+    }
+
+    /**
+     * 开机广播或 START_STICKY 单独恢复服务时，App 主界面没有机会调用 RootShell.refresh()。
+     * Root 管理器可能晚于 BOOT_COMPLETED 就绪，因此在 IO 协程中退避重试；不占用投影单线程队列，
+     * 也不直接调用 RearProjector，Root 成功后统一回到自动投放入口，避免同一首歌重复投放。
+     */
+    private fun ensureRootReady(reason: String) {
+        if (RootShell.available) return
+        synchronized(rootInitLock) {
+            if (rootInitJob?.isActive == true) return
+            rootInitJob = serviceScope.launch(Dispatchers.IO) {
+                for ((index, waitMs) in ROOT_INIT_RETRY_DELAYS_MS.withIndex()) {
+                    if (waitMs > 0L) delay(waitMs)
+                    val ready = RootShell.available ||
+                        runCatching { RootShell.refresh() }.getOrDefault(false)
+                    Log.i(TAG, "background root init ${index + 1}/${ROOT_INIT_RETRY_DELAYS_MS.size} [$reason] -> $ready")
+                    if (ready) {
+                        withContext(Dispatchers.Main.immediate) {
+                            maybeAutoProject("root-ready:$reason")
+                        }
+                        return@launch
+                    }
+                }
+                Log.w(TAG, "background root init exhausted [$reason]; retry on next projection request")
+            }
+        }
     }
 
     private fun tickRearWakeup() {
@@ -339,7 +386,11 @@ class LyricService : Service() {
             SystemClock.elapsedRealtime() - lastFrame > FREEZE_THRESHOLD_MS
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 覆盖服务实例仍在但收到重复启动，以及上一轮 Root 重试已经耗尽的情况。
+        ensureRootReady("service-start")
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -377,6 +428,7 @@ class LyricService : Service() {
     /** 按选中的歌词数据源启停对应来源（词幕订阅端 ↔ SuperLyric 接收器），并清空旧来源残留。 */
     private fun applyLyricSource(source: LyricSource) {
         Log.i(TAG, "applyLyricSource: $source")
+        lastAutoProjectedSuperSongId = null
         LyricBus.reset()
         when (source) {
             LyricSource.LYRICON -> {
@@ -444,16 +496,24 @@ class LyricService : Service() {
         override fun onDisplayRomaChanged(isDisplayRoma: Boolean) = Unit
     }
 
-    private fun allowed(): Boolean = AppFilterState.current.allows(currentPlayerPackage)
+    /** SuperLyric 的发布者包名写在 LyricBus；lyricon 则由 ProviderInfo 维护私有字段。 */
+    private fun activePlayerPackage(): String? =
+        if (LyricSourceState.current == LyricSource.SUPERLYRIC) {
+            LyricBus.playerPackage.value
+        } else {
+            currentPlayerPackage
+        }
+
+    private fun allowed(): Boolean = AppFilterState.current.allows(activePlayerPackage())
 
     /**
-     * 拉取当前歌曲封面。来源优先级：精确匹配封面文件 > 通知使用权(MediaSession) > 最新封面文件。
+     * 拉取当前歌曲封面。来源优先级：SystemUI hook 实时字节 > 精确匹配封面文件 > 最新封面文件。
      * 时间戳校验：重试期间只采用"不早于切歌时刻"的封面（拒绝上一首）；当前完全无封面时才兜底取最新一张。
      * 已有封面则保留，等 SystemUI hook 在会话元数据变化时字节广播推送替换，避免被旧图覆盖。
      */
     private fun refreshCover(retry: Boolean) {
         val token = ++coverRefreshToken
-        val packageName = currentPlayerPackage ?: run {
+        val packageName = activePlayerPackage() ?: run {
             LyricBus.cover.value = null
             return
         }
@@ -511,11 +571,15 @@ class LyricService : Service() {
         val hasSong = LyricBus.song.value != null
         val allow = allowed()
         val enabled = ProjectionState.current
-        Log.i(TAG, "auto-project[$reason]: song=$hasSong allowed=$allow enabled=$enabled pkg=$currentPlayerPackage projected=${LyricBus.projected.value}")
+        Log.i(TAG, "auto-project[$reason]: song=$hasSong allowed=$allow enabled=$enabled pkg=${activePlayerPackage()} projected=${LyricBus.projected.value}")
         if (hasSong && allow && enabled) showRear()
     }
 
     private fun showRear() {
+        if (!RootShell.available) {
+            ensureRootReady("show-request")
+            return
+        }
         lastShowAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "showRear -> project to rear")
         projectExecutor.execute { RearProjector.show() }
@@ -662,6 +726,9 @@ class LyricService : Service() {
         /** 自系统会话读进度的轮询间隔；以及「多久没读到会话进度就回退用词幕进度」的 TTL。 */
         private const val SESSION_POS_POLL_MS = 500L
         private const val SESSION_POS_TTL_MS = 2000L
+
+        /** 开机后 Root 管理器可能稍晚就绪；失败后下一次歌曲/投放请求还会重新开始一轮。 */
+        private val ROOT_INIT_RETRY_DELAYS_MS = longArrayOf(0L, 2_000L, 5_000L, 10_000L, 20_000L, 30_000L)
 
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
 

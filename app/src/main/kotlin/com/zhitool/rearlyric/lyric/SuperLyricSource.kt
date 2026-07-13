@@ -22,26 +22,26 @@ import io.github.proify.lyricon.lyric.model.Song
  * 只保留**当前一句**（不累积、不滚动）。
  *
  * 分工（关键，修"歌名卡住/进度条不动"）：
- * - **歌名 / 歌手 / 封面 / 播放进度**：一律由**系统会话（MediaSession）**权威提供——随切歌可靠变化，
- *   进度真实（拖动 seek 后进度条会动）。`LyricService` 周期把会话元数据喂给 [onMeta]、进度喂给 LyricBus。
+ * - **歌名 / 歌手 / 封面 / 播放进度**：由 LSPosed 在 SystemUI 内读取**系统会话（MediaSession）**并
+ *   桥接给应用——无需通知使用权，随切歌可靠变化，且拖动 seek 后进度条会实时更新。
  * - **当前句歌词文本 + 逐字时间**：由 SuperLyric `onLyric` 提供（按**绝对时间**，与会话进度同一时间轴，
  *   故逐字扫过能跟系统进度对齐）。
  *
- * 鲁棒性：锁定单一发布者（避免上一首/另一来源交替）；会话 id 仅在歌名真变时换（=换歌→清当前句 + 播切换动画）。
+ * 鲁棒性：锁定单一发布者（避免上一首/另一来源交替）；会话 id 仅在完整歌曲身份（歌名+歌手）变化时换。
  */
 object SuperLyricSource {
     private const val TAG = "ZhiSuperLyric"
     private const val PUBLISHER_STALE_MS = 4000L
 
-    /** 出歌词后歌手区「歌名 - 歌手」的分隔符（QQ音乐/网易云等）。 */
-    private const val META_ARTIST_SEP = " - "
-
     @Volatile
     private var receiver: ISuperLyricReceiver.Stub? = null
 
+    private val stateLock = Any()
+    private val metaNormalizer = SuperLyricMetaNormalizer()
     private var currentLine: RichLyricLine? = null
     private var title: String? = null
     private var artist: String? = null
+    private var songKey: String? = null
     private var sessionId = 0L
     private var activePublisher: String? = null
     private var lastLineAt = 0L
@@ -80,100 +80,108 @@ object SuperLyricSource {
     }
 
     private fun resetAll() {
-        currentLine = null
-        title = null
-        artist = null
-        sessionId = 0L
-        activePublisher = null
-        lastLineAt = 0L
+        synchronized(stateLock) {
+            metaNormalizer.reset()
+            currentLine = null
+            title = null
+            artist = null
+            songKey = null
+            sessionId = 0L
+            activePublisher = null
+            lastLineAt = 0L
+        }
     }
 
     /**
-     * 把系统会话元数据解析成真正的「歌名 / 歌手」。
+     * 接收系统 MediaSession 的原始元数据并立刻归一化、提交。
      *
-     * QQ音乐 / 网易云 等播放器**出歌词后**会把当前句歌词塞进会话 TITLE、并把歌手区改成
-     * 「歌名 - 歌手」。若直接拿 TITLE 当歌名，会因每句歌词刷新 TITLE 被一直误判成切歌、歌词出不来。
-     * 故：
-     * - 歌手区含「 - 」（出歌词态）：从歌手区拆「歌名 - 歌手」，TITLE（当前句歌词）忽略；
-     * - 否则（刚切歌/未出歌词）：TITLE=歌名、ARTIST=歌手。
-     *
-     * 这样同一首歌内歌名稳定，不再随逐句刷新；返回 (歌名, 歌手)。
+     * 小米适配播放器在歌词开始后会把 TITLE 改成当前句，并把 ARTIST 改成「歌名-歌手」。
+     * 归一化器会结合当前 SuperLyric 行和切歌词前已建立的歌名/歌手做状态化判断，兼容无空格及
+     * Unicode 横线；歌曲身份使用完整歌名+歌手，而不是逐句变化的 TITLE。
      */
-    fun resolveMeta(rawTitle: String?, rawArtist: String?): Pair<String?, String?> {
-        val a = rawArtist?.trim()
-        if (!a.isNullOrEmpty() && a.contains(META_ARTIST_SEP)) {
-            val name = a.substringBeforeLast(META_ARTIST_SEP).trim()
-            val singer = a.substringAfterLast(META_ARTIST_SEP).trim()
-            if (name.isNotEmpty() && singer.isNotEmpty()) return name to singer
-        }
-        return rawTitle to rawArtist
+    internal fun onMediaMeta(
+        rawTitle: String?,
+        rawArtist: String?,
+    ): SuperLyricMetaNormalizer.Result? = synchronized(stateLock) {
+        if (receiver == null) return@synchronized null
+        val normalized = metaNormalizer.resolve(rawTitle, rawArtist, currentLine?.text)
+        applyNormalizedMeta(normalized)
+        normalized
     }
 
-    /**
-     * 系统会话元数据（[LyricService] 周期调用，权威，已 [resolveMeta] 归一化）：
-     * 歌名变=换歌 → session++ 清当前句（播切换动画）。
-     * 仅"从一首换到另一首"（前后歌名都非空且不同）才算换歌；初次 null→歌名 不清当前句。
-     */
-    fun onMeta(metaTitle: String?, metaArtist: String?) {
-        if (receiver == null) return
-        val t = metaTitle?.takeIf { it.isNotBlank() }
-        val a = metaArtist?.takeIf { it.isNotBlank() }
-        var changed = false
-        if (t != title) {
-            val realSongChange = title != null && t != null
-            title = t
-            if (realSongChange) {
-                sessionId++
-                currentLine = null
-            }
+    /** 调用方已在 [stateLock] 内；返回是否真的换了歌曲身份。 */
+    private fun applyNormalizedMeta(meta: SuperLyricMetaNormalizer.Result): Boolean {
+        val nextTitle = meta.displayTitle?.takeIf { it.isNotBlank() }
+        val nextArtist = meta.displayArtist?.takeIf { it.isNotBlank() }
+        val nextKey = meta.songKey
+        val realSongChange = songKey != null && nextKey != null && songKey != nextKey
+        var changed = realSongChange
+
+        if (realSongChange) {
+            sessionId++
+            // 若新的 MediaSession TITLE 已等于刚收到的 SuperLyric 行，这一行属于新歌，不能清掉。
+            if (!meta.titleIsLyric) currentLine = null
+        }
+        if (nextTitle != null && nextTitle != title) {
+            title = nextTitle
             changed = true
         }
-        if (a != artist) {
-            artist = a
+        if (nextArtist != null && nextArtist != artist) {
+            artist = nextArtist
             changed = true
         }
+        if (nextKey != null) songKey = nextKey
         if (changed) rebuild()
+        return realSongChange
     }
 
     private fun handleLyric(publisher: String?, data: SuperLyricData) {
-        val now = SystemClock.elapsedRealtime()
-        // 锁定单一发布者：活跃发布者新鲜时忽略其它发布者的行（避免上一首/另一来源交替）。
-        if (publisher != activePublisher) {
-            if (activePublisher == null || now - lastLineAt > PUBLISHER_STALE_MS) {
-                activePublisher = publisher
-            } else {
-                return
-            }
-        }
-        lastLineAt = now
-
-        if (!publisher.isNullOrBlank()) LyricBus.playerPackage.value = publisher
-        if (data.hasBase64Icon()) {
-            runCatching { Base64.decode(data.base64Icon, Base64.DEFAULT) }
-                .getOrNull()?.takeIf { it.isNotEmpty() }?.let { LyricBus.setCover(it) }
-        }
-        // 会话还没给歌名/歌手时，先用 SuperLyric 自带的兜底（之后会话元数据为准）。
-        if (title == null && data.hasTitle()) data.title?.takeIf { it.isNotBlank() }?.let { title = it }
-        if (artist == null && data.hasArtist()) data.artist?.takeIf { it.isNotBlank() }?.let { artist = it }
-
-        if (data.hasLyric()) {
-            val line = data.lyric
-            val text = line?.text
-            if (line != null && !text.isNullOrBlank()) {
-                // 绝对时间：与系统会话进度同一时间轴，逐字扫过随系统进度走。
-                val words = line.words?.takeIf { it.isNotEmpty() }?.mapNotNull { w ->
-                    val wt = w.word ?: return@mapNotNull null
-                    LyricWord(begin = w.startTime, end = w.endTime.coerceAtLeast(w.startTime), text = wt)
+        synchronized(stateLock) {
+            val now = SystemClock.elapsedRealtime()
+            // 锁定单一发布者：活跃发布者新鲜时忽略其它发布者的行（避免上一首/另一来源交替）。
+            if (publisher != activePublisher) {
+                if (activePublisher == null || now - lastLineAt > PUBLISHER_STALE_MS) {
+                    activePublisher = publisher
+                } else {
+                    return@synchronized
                 }
-                currentLine = RichLyricLine(
-                    begin = line.startTime,
-                    end = line.endTime.coerceAtLeast(line.startTime + 300L),
-                    text = text,
-                    words = words,
-                    secondary = if (data.hasSecondary()) data.secondary?.text else null,
-                    translation = if (data.hasTranslation()) data.translation?.text else null,
+            }
+            lastLineAt = now
+
+            if (!publisher.isNullOrBlank()) LyricBus.playerPackage.value = publisher
+            if (data.hasBase64Icon()) {
+                runCatching { Base64.decode(data.base64Icon, Base64.DEFAULT) }
+                    .getOrNull()?.takeIf { it.isNotEmpty() }?.let { LyricBus.setCover(it) }
+            }
+            // 会话尚未可读时，用 SuperLyric 自带歌名/歌手建立同一套身份锚；后续仍由会话精化。
+            if (data.hasTitle() || data.hasArtist()) {
+                val hinted = metaNormalizer.resolve(
+                    rawTitle = data.title?.takeIf { data.hasTitle() },
+                    rawArtist = data.artist?.takeIf { data.hasArtist() },
+                    currentLyric = currentLine?.text,
                 )
-                rebuild()
+                applyNormalizedMeta(hinted)
+            }
+
+            if (data.hasLyric()) {
+                val line = data.lyric
+                val text = line?.text
+                if (line != null && !text.isNullOrBlank()) {
+                    // 绝对时间：与系统会话进度同一时间轴，逐字扫过随系统进度走。
+                    val words = line.words?.takeIf { it.isNotEmpty() }?.mapNotNull { w ->
+                        val wt = w.word ?: return@mapNotNull null
+                        LyricWord(begin = w.startTime, end = w.endTime.coerceAtLeast(w.startTime), text = wt)
+                    }
+                    currentLine = RichLyricLine(
+                        begin = line.startTime,
+                        end = line.endTime.coerceAtLeast(line.startTime + 300L),
+                        text = text,
+                        words = words,
+                        secondary = if (data.hasSecondary()) data.secondary?.text else null,
+                        translation = if (data.hasTranslation()) data.translation?.text else null,
+                    )
+                    rebuild()
+                }
             }
         }
     }

@@ -5,6 +5,9 @@ import androidx.annotation.Keep
 import com.zhitool.rearlyric.BuildConfig
 import com.zhitool.rearlyric.xposed.subscreen.SubScreenHomeGuard
 import com.zhitool.rearlyric.xposed.system.BackgroundWhitelistHook
+import com.zhitool.rearlyric.xposed.system.RearActivityGuardHook
+import com.zhitool.rearlyric.xposed.system.RearScreenCoverHook
+import com.zhitool.rearlyric.xposed.system.SubScreenDoubleTapSleepHook
 import com.zhitool.rearlyric.xposed.systemui.SystemUIHooker
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
@@ -37,7 +40,13 @@ class ModuleEntry : XposedModule() {
     override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
         Log.i("ZhiModuleEntry", "system server starting")
         runCatching { BackgroundWhitelistHook.hook(this, param.classLoader) }
-            .onFailure { Log.e("ZhiModuleEntry", "system server hook failed", it) }
+            .onFailure { Log.e("ZhiModuleEntry", "background whitelist hook failed", it) }
+        runCatching { RearActivityGuardHook.hook(this, param.classLoader) }
+            .onFailure { Log.e("ZhiModuleEntry", "rear activity guard hook failed", it) }
+        runCatching { SubScreenDoubleTapSleepHook.hook(this, param.classLoader) }
+            .onFailure { Log.e("ZhiModuleEntry", "rear double-tap hook failed", it) }
+        runCatching { RearScreenCoverHook.hook(this, param.classLoader) }
+            .onFailure { Log.e("ZhiModuleEntry", "rear cover hook failed", it) }
     }
 
     override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {

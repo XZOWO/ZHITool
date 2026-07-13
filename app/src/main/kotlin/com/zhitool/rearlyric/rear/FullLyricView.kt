@@ -141,9 +141,7 @@ private const val DOT_PULSE_PERIOD_MS = 2400.0
 private const val DOT_EXIT_LEAD_MS = 500L
 private const val DOT_MIN_INTRO_MS = 1200L
 
-/** 长按解锁：蓄力时长（圆形进度填满即解锁）、移动取消阈值、解锁后空闲自动回锁、小锁开合动画时长。 */
-private const val UNLOCK_HOLD_MS = 1000L
-private const val UNLOCK_MOVE_CANCEL_DP = 16f
+/** 长按解锁：蓄力时长与封面长按共用 [REAR_LONG_PRESS_MS]，其余为自动回锁与小锁动画时长。 */
 private const val UNLOCK_IDLE_RELOCK_MS = 6000L
 private const val LOCK_ANIM_MS = 420f
 /** seek 后本地进度覆盖：直播进度回到附近这个窗口内即认为已追上(撤销覆盖)；最长覆盖时长(防卡死)。 */
@@ -184,10 +182,6 @@ private const val NAME_SHOW_MS = 3000L
 private const val NAME_TIME_SWITCH_MS = 280f
 private const val MARQUEE_SPEED_DP = 36f
 private const val MARQUEE_GAP_DP = 44f
-/** 封面单击/双击：双击进控制面板的判定窗口；单击弹"双击打开控制页"提示的总显示时长与提示文案。 */
-private const val COVER_DOUBLE_TAP_MS = 280L
-private const val COVER_HINT_MS = 2600f
-private const val COVER_HINT_TEXT = "双击打开控制页"
 /** 旋转封面每圈用时（秒），与单句模式一致。 */
 private const val COVER_ROTATION_SECONDS = 16f
 /** 渐变高亮：前沿羽化宽度（相对字号）。 */
@@ -349,23 +343,35 @@ internal class FullLyricView @JvmOverloads constructor(
     private var coverScaleStartedAt = 0L
     /** 停靠后文字区显示歌名的起点（墙钟）：自动模式下此后 NAME_SHOW_MS 内显示歌名再切时间；跑马灯起点。 */
     private var nameRevealAt = 0L
-    /** 手动覆盖：-1=自动（歌名 NAME_SHOW_MS 后切时间）、0=强制时间、1=强制歌名。点击封面/时间区切换。 */
+    /** 手动覆盖：-1=自动（歌名 NAME_SHOW_MS 后切时间）、0=强制时间、1=强制歌名。点击文字区切换。 */
     private var manualNameOverride = -1
     /** 歌名↔时间交叉淡入淡出：当前因子 1=歌名 0=时间，from→target 在 NAME_TIME_SWITCH_MS 内过渡。 */
     private var dockNameFrom = 1f
     private var dockNameTarget = 1f
     private var dockNameAnimAt = 0L
-    /** 封面命中区（视图坐标）：双击封面 → 放大成控制面板（onCoverTap）；单击 → 弹"双击打开控制页"提示。 */
+    /** 封面命中区（视图坐标）：仅在封面内按满 [REAR_LONG_PRESS_MS] 打开控制面板。 */
     private val coverHitRect = RectF()
-    /** 封面单击/双击判定：[coverTapAt]=上次单击墙钟（判双击）；[coverHintAt]=提示起始墙钟（0=未显示）。 */
-    private var coverTapAt = 0L
-    private var coverHintAt = 0L
+    /** 封面长按起点与触点状态；进度上报 Compose 公共提示层。 */
+    private var coverHoldAt = 0L
+    private var coverTouchActive = false
+    private var coverTouchStartedInPanel = false
+    private var coverHoldTriggered = false
+    private var coverHoldCancelled = false
+    private var coverDownX = 0f
+    private var coverDownY = 0f
+    private var coverHoldVisualReported = false
     /** 角落封面当前是否已停靠 + 文字带命中区（封面左侧文字区，点击切换歌名/时间）。 */
     private var coverDocked = false
     private val textHitRect = RectF()
 
-    /** 点击封面的回调（放大成收藏/切歌/暂停控制面板，由 RearLyricActivity 设置）。 */
+    /** 封面长按完成或展开态点封面的回调（开/关控制面板，由 RearLyricActivity 设置）。 */
     var onCoverTap: (() -> Unit)? = null
+
+    /** 封面长按可视状态；由外层 Compose 与错位交替模式共用同一个提示组件。 */
+    var onCoverHoldVisual: ((holding: Boolean, progress: Float) -> Unit)? = null
+
+    /** 封面短按只请求外层显示长按提示，不改变歌名/时间状态。 */
+    var onCoverShortTap: (() -> Unit)? = null
 
     /** 调整进度回调（点击某句歌词 → MediaControl.seekTo + 起播；拖动松手不 seek）。 */
     var onSeek: ((Long) -> Unit)? = null
@@ -385,7 +391,7 @@ internal class FullLyricView @JvmOverloads constructor(
     private val handler = Handler(Looper.getMainLooper())
 
     // ---- 锁定 / 长按解锁 ----
-    /** 歌词默认锁定；长按 2s 解锁后可点击跳转/拖动调整进度，空闲 [UNLOCK_IDLE_RELOCK_MS] 自动回锁。 */
+    /** 歌词默认锁定；长按 [REAR_LONG_PRESS_MS] 解锁后可点击跳转/拖动，空闲后自动回锁。 */
     private var unlocked = false
     /** 长按蓄力起点（墙钟，0=未蓄力）；蓄力中左侧时间处画圆形进度+小锁。 */
     private var pressArmAt = 0L
@@ -398,8 +404,7 @@ internal class FullLyricView @JvmOverloads constructor(
     private var lockReported = false
     private val relockRunnable = Runnable { doRelock() }
     private val unlockRunnable = Runnable { doUnlock() }
-    /** 封面单击延时确认（在双击窗口内没有第二击才弹提示）。 */
-    private val coverSingleTapRunnable = Runnable { triggerCoverHint() }
+    private val coverHoldRunnable = Runnable { completeCoverHold() }
 
     // ---- 拖动调整进度（scrub，自由滚动 + 惯性）----
     /** 手动浏览中：渲染用 [scrubScroll] 取代直播滚动（手指抓取/惯性/松手停留期间都为 true）。 */
@@ -669,7 +674,9 @@ internal class FullLyricView @JvmOverloads constructor(
         super.onDetachedFromWindow()
         handler.removeCallbacks(unlockRunnable)
         handler.removeCallbacks(relockRunnable)
-        handler.removeCallbacks(coverSingleTapRunnable)
+        handler.removeCallbacks(coverHoldRunnable)
+        if (coverHoldVisualReported) onCoverHoldVisual?.invoke(false, 0f)
+        coverHoldVisualReported = false
         recycleVelocity()
         rhythmLayer?.recycle()
         rhythmLayer = null
@@ -701,6 +708,7 @@ internal class FullLyricView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val now = SystemClock.elapsedRealtime()
+        reportCoverHoldVisual(now)
         val snapshot = songSwitchBitmap
         if (snapshot != null && !snapshot.isRecycled && now - songSwitchStartedAt < SONG_SWITCH_MS) {
             val p = 1f - (1f - ((now - songSwitchStartedAt) / SONG_SWITCH_MS).coerceIn(0f, 1f)).pow(3)
@@ -724,6 +732,8 @@ internal class FullLyricView @JvmOverloads constructor(
         }
         renderLyrics(canvas, now)
         drawCoverTransition(canvas, now)
+        // 封面长按进度必须逐帧推进；暂停/无歌词时没有其它动画源，需由 View 自己驱帧。
+        if (coverHoldAt != 0L) postInvalidateOnAnimation()
     }
 
     private fun renderLyrics(canvas: Canvas, now: Long) {
@@ -821,9 +831,7 @@ internal class FullLyricView @JvmOverloads constructor(
                 // 歌名↔时间交叉过渡期间持续重绘。
                 (dockNameAnimAt != 0L && now - dockNameAnimAt < NAME_TIME_SWITCH_MS.toLong()) ||
                 // 歌名显示中（跑马灯/自动切时间计时）持续重绘。
-                (coverDocked && dockNameTarget >= 0.5f) ||
-                // 单击封面的"双击打开控制页"提示淡入淡出期间持续重绘。
-                (coverHintAt != 0L && now - coverHintAt < COVER_HINT_MS.toLong())
+                (coverDocked && dockNameTarget >= 0.5f)
         )
         // 律动开启且在播放：能量逐帧变化，需持续自驱重绘（不完全依赖 Compose 每帧 bind，
         // 帧交付更稳，减少发光/缩放的"卡顿感"）。暂停/静音时能量归零后不再排帧，不空耗电。
@@ -945,7 +953,6 @@ internal class FullLyricView @JvmOverloads constructor(
         val coverAnimating = coverWidgetEnabled && (
             (config.coverShape == CoverShape.CIRCLE_ROTATE && playing) ||
                 (coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()) ||
-                (coverHintAt != 0L && now - coverHintAt < COVER_HINT_MS.toLong()) ||
                 coverTransitionActive(now)
             )
         // 播放中：逐字扫过靠逐帧外推推进，需要持续重绘。
@@ -1228,8 +1235,11 @@ internal class FullLyricView @JvmOverloads constructor(
         dockNameTarget = 1f
         dockNameAnimAt = 0L
         coverDocked = false
-        coverTapAt = 0L
-        coverHintAt = 0L
+        handler.removeCallbacks(coverHoldRunnable)
+        coverHoldAt = 0L
+        coverTouchActive = false
+        coverHoldTriggered = false
+        coverHoldCancelled = false
     }
 
     /** 引导卡歌名单次排版（无省略、不限行数，用于自适应缩字号判断真实行数）。 */
@@ -2194,7 +2204,7 @@ internal class FullLyricView @JvmOverloads constructor(
             val rowLeft = contentLeft + ((contentWidth - rowW) / 2f).coerceAtLeast(0f)
             val coverCx = rowLeft + cover / 2f
             val textLeft = rowLeft + cover + gap
-            // 封面命中区：无歌词卡的居中封面也可点击放大成控制面板。
+            // 封面命中区：无歌词卡的居中封面也可长按打开控制面板。
             val hitPad = dp(12f)
             coverHitRect.set(
                 coverCx - cover / 2f - hitPad,
@@ -2213,7 +2223,9 @@ internal class FullLyricView @JvmOverloads constructor(
             }
             drawIntroText(canvas, textLeft, centerY, 1f)
             val scaleAnimating = coverScaleStartedAt != 0L && now - coverScaleStartedAt < DOCK_SCALE_MS.toLong()
-            if ((config.coverShape == CoverShape.CIRCLE_ROTATE && playing) || scaleAnimating || coverTransitionActive(now)) {
+            if ((config.coverShape == CoverShape.CIRCLE_ROTATE && playing) || scaleAnimating ||
+                coverTransitionActive(now) || coverHoldAt != 0L
+            ) {
                 postInvalidateOnAnimation()
             }
         } else {
@@ -2270,7 +2282,7 @@ internal class FullLyricView @JvmOverloads constructor(
         val coverCx = lerp(introCoverCx, dockCoverCx, p)
         val coverCy = lerp(introCoverCy, dockCoverCy, p)
 
-        // 封面命中区：始终跟随当前绘制的封面（引导卡大封面或角落小封面），点击放大成控制面板。
+        // 封面命中区：始终跟随当前绘制的封面（引导卡大封面或角落小封面），长按打开控制面板。
         val hitPad = dp(12f)
         coverHitRect.set(
             coverCx - coverSize / 2f - hitPad,
@@ -2300,9 +2312,6 @@ internal class FullLyricView @JvmOverloads constructor(
             drawCoverBreathing(canvas, bmp, coverCx, coverCy, coverSize, rotationDeg)
         }
 
-        // 单击封面弹"双击打开控制页"提示：大封面画在圆点行、小封面画在时间处，几秒后自动淡出。
-        val hintAlpha = coverHintAlpha(now)
-
         val introAlpha = (1f - p).coerceIn(0f, 1f)
         if (introAlpha > 0.01f) {
             drawIntroText(canvas, textLeft, introCoverCy, introAlpha)
@@ -2310,10 +2319,7 @@ internal class FullLyricView @JvmOverloads constructor(
             if (!panelMode) {
                 val firstLineTop = height / 2f - lastScroll
                 val dotsY = firstLineTop - textSizePx * 0.55f
-                if (hintAlpha > 0.01f && !coverDocked) {
-                    // 大封面单击：圆点行改画提示。
-                    drawCoverHint(canvas, contentLeft + contentWidth / 2f, dotsY, hintAlpha * introAlpha, centered = true)
-                } else if (!singleLineMode) {
+                if (!singleLineMode) {
                     // SuperLyric 单句模式不画圆点（下方改画当前句歌词）。
                     drawIntroDots(canvas, contentLeft, contentWidth, dotsY, introAlpha)
                 }
@@ -2325,10 +2331,7 @@ internal class FullLyricView @JvmOverloads constructor(
         if (textAlpha > 0.01f) {
             // 文字区在封面左侧：右边界=封面左缘-间距，左边界=内容左缘。
             val rightEdge = coverCx - coverSize / 2f - dp(CLOCK_GAP_DP)
-            if (hintAlpha > 0.01f && coverDocked) {
-                // 小封面单击：时间处改画提示（居右，取代歌名/时间）。
-                drawCoverHint(canvas, rightEdge, coverCy, textAlpha * hintAlpha, centered = false)
-            } else if (unlocked) {
+            if (unlocked) {
                 // 解锁后封面左侧提示"歌词已解锁 / 可滑动调整进度"，取代歌名/时间。
                 drawUnlockHint(canvas, contentLeft, rightEdge, coverCy, textAlpha)
             } else {
@@ -2401,34 +2404,16 @@ internal class FullLyricView @JvmOverloads constructor(
         }
     }
 
-    /** 单击封面触发提示（双击窗口内无第二击才弹）。 */
-    private fun triggerCoverHint() {
-        coverTapAt = 0L
-        coverHintAt = SystemClock.elapsedRealtime()
-        invalidate()
-    }
-
-    /** "双击打开控制页"提示的当前透明度：快速淡入、末段淡出；过期即清零（停止重绘）。 */
-    private fun coverHintAlpha(now: Long): Float {
-        if (coverHintAt == 0L) return 0f
-        val t = (now - coverHintAt).toFloat()
-        if (t >= COVER_HINT_MS) {
-            coverHintAt = 0L
-            return 0f
+    /** 把封面按压进度交给 Compose；FullLyricView 不再在封面或文字旁单独绘制提示。 */
+    private fun reportCoverHoldVisual(now: Long) {
+        if (coverHoldAt != 0L) {
+            val progress = ((now - coverHoldAt) / REAR_LONG_PRESS_MS.toFloat()).coerceIn(0f, 1f)
+            onCoverHoldVisual?.invoke(true, progress)
+            coverHoldVisualReported = true
+        } else if (coverHoldVisualReported) {
+            onCoverHoldVisual?.invoke(false, 0f)
+            coverHoldVisualReported = false
         }
-        return min(t / 150f, (COVER_HINT_MS - t) / 450f).coerceIn(0f, 1f)
-    }
-
-    /** 画"双击打开控制页"提示：[centered]=以 x 为中心（大封面圆点行），否则以 x 为右缘居右（小封面时间处）。 */
-    private fun drawCoverHint(canvas: Canvas, x: Float, centerY: Float, alpha: Float, centered: Boolean) {
-        clockPaint.textSize = textSizePx * 0.5f
-        clockPaint.alpha = (255f * alpha).roundToInt().coerceIn(0, 255)
-        val tw = clockPaint.measureText(COVER_HINT_TEXT)
-        val fm = clockPaint.fontMetrics
-        val baseline = centerY - (fm.ascent + fm.descent) / 2f
-        val left = if (centered) x - tw / 2f else x - tw
-        canvas.drawText(COVER_HINT_TEXT, left, baseline, clockPaint)
-        clockPaint.alpha = 255
     }
 
     /** 解锁后封面左侧提示：两行右对齐「歌词已解锁 / 可滑动调整进度」，字号自适应可用宽度。 */
@@ -2473,7 +2458,11 @@ internal class FullLyricView @JvmOverloads constructor(
         when (event.actionMasked) {
             // 必须消费 DOWN 才能收到 UP（非 clickable 的 View 默认 DOWN 返回 false 就收不到后续事件）。
             MotionEvent.ACTION_DOWN -> {
-                if (inCover || inText) return true
+                if (inCover) {
+                    beginCoverTouch(event)
+                    return true
+                }
+                if (inText) return true
                 // SuperLyric 单句模式：无整首歌词，长按解锁 + 拖动调进度没意义，直接不接管歌词区手势。
                 if (singleLineMode) return false
                 if (panelMode || models.isEmpty()) return false
@@ -2484,10 +2473,20 @@ internal class FullLyricView @JvmOverloads constructor(
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (coverTouchActive) {
+                    if (!coverHoldCancelled && !coverHoldTriggered &&
+                        (!inCover ||
+                            abs(event.x - coverDownX) > dp(REAR_LONG_PRESS_MOVE_CANCEL_DP) ||
+                            abs(event.y - coverDownY) > dp(REAR_LONG_PRESS_MOVE_CANCEL_DP))
+                    ) {
+                        cancelCoverHold(markCancelled = true)
+                    }
+                    return true
+                }
                 if (pressArmAt != 0L) {
                     // 蓄力中移动超阈值即取消（避免把拖动误判为长按；背屏被遮挡产生的滑动也不会误解锁）。
-                    if (abs(event.x - pressDownX) > dp(UNLOCK_MOVE_CANCEL_DP) ||
-                        abs(event.y - pressDownY) > dp(UNLOCK_MOVE_CANCEL_DP)
+                    if (abs(event.x - pressDownX) > dp(REAR_LONG_PRESS_MOVE_CANCEL_DP) ||
+                        abs(event.y - pressDownY) > dp(REAR_LONG_PRESS_MOVE_CANCEL_DP)
                     ) {
                         cancelUnlockHold()
                     }
@@ -2503,25 +2502,8 @@ internal class FullLyricView @JvmOverloads constructor(
                 }
             }
             MotionEvent.ACTION_UP -> {
-                if (inCover) {
-                    if (panelMode) {
-                        // 面板已展开：单击封面即返回歌词（无需双击）。
-                        onCoverTap?.invoke()
-                    } else {
-                        // 非面板态：双击放大成控制面板；单击只弹"双击打开控制页"提示（圆点行/时间处）。
-                        val tnow = SystemClock.elapsedRealtime()
-                        if (tnow - coverTapAt <= COVER_DOUBLE_TAP_MS) {
-                            coverTapAt = 0L
-                            coverHintAt = 0L
-                            handler.removeCallbacks(coverSingleTapRunnable)
-                            onCoverTap?.invoke()
-                        } else {
-                            coverTapAt = tnow
-                            handler.removeCallbacks(coverSingleTapRunnable)
-                            handler.postDelayed(coverSingleTapRunnable, COVER_DOUBLE_TAP_MS)
-                        }
-                    }
-                    performClick()
+                if (coverTouchActive) {
+                    finishCoverTouch(releasedInCover = inCover)
                     return true
                 }
                 if (inText) {
@@ -2554,6 +2536,7 @@ internal class FullLyricView @JvmOverloads constructor(
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
+                cancelCoverTouch()
                 cancelUnlockHold()
                 if (scrubGrabbed) {
                     scrubGrabbed = false
@@ -2565,6 +2548,87 @@ internal class FullLyricView @JvmOverloads constructor(
         return super.onTouchEvent(event)
     }
 
+    /** 封面按下：面板内只等待短按关闭；歌词态启动精确 1 秒长按并上报公共提示层。 */
+    private fun beginCoverTouch(event: MotionEvent) {
+        coverTouchActive = true
+        coverTouchStartedInPanel = panelMode
+        coverHoldTriggered = false
+        coverHoldCancelled = false
+        coverDownX = event.x
+        coverDownY = event.y
+        handler.removeCallbacks(coverHoldRunnable)
+        if (coverTouchStartedInPanel) {
+            coverHoldAt = 0L
+        } else {
+            coverHoldAt = SystemClock.elapsedRealtime()
+            onCoverHoldVisual?.invoke(true, 0f)
+            coverHoldVisualReported = true
+            handler.postDelayed(coverHoldRunnable, REAR_LONG_PRESS_MS)
+            invalidate()
+        }
+    }
+
+    /** 位移超阈值只取消本次长按，不把滑动误当成短按提示。 */
+    private fun cancelCoverHold(markCancelled: Boolean) {
+        if (markCancelled) coverHoldCancelled = true
+        coverHoldAt = 0L
+        handler.removeCallbacks(coverHoldRunnable)
+        if (coverHoldVisualReported) onCoverHoldVisual?.invoke(false, 0f)
+        coverHoldVisualReported = false
+        invalidate()
+    }
+
+    /** Handler 到点或抬手时已经跨过 1000ms：只触发一次控制页。 */
+    private fun completeCoverHold() {
+        if (!coverTouchActive || coverTouchStartedInPanel || coverHoldCancelled || coverHoldTriggered) return
+        coverHoldTriggered = true
+        coverHoldAt = 0L
+        handler.removeCallbacks(coverHoldRunnable)
+        if (coverHoldVisualReported) onCoverHoldVisual?.invoke(false, 0f)
+        coverHoldVisualReported = false
+        onCoverTap?.invoke()
+        invalidate()
+    }
+
+    private fun finishCoverTouch(releasedInCover: Boolean) {
+        val startedInPanel = coverTouchStartedInPanel
+        if (!startedInPanel && !coverHoldCancelled && !coverHoldTriggered &&
+            coverHoldAt != 0L && SystemClock.elapsedRealtime() - coverHoldAt >= REAR_LONG_PRESS_MS
+        ) {
+            // 主线程繁忙导致定时 Runnable 稍晚时，抬手也按真实墙钟补判，保证满 1000ms 必定成功。
+            completeCoverHold()
+        }
+        val triggered = coverHoldTriggered
+        val cancelled = coverHoldCancelled
+        coverTouchActive = false
+        coverTouchStartedInPanel = false
+        coverHoldTriggered = false
+        coverHoldCancelled = false
+        cancelCoverHold(markCancelled = false)
+
+        when {
+            startedInPanel && !cancelled && releasedInCover -> {
+                // 展开态点封面直接关闭控制页。
+                onCoverTap?.invoke()
+                performClick()
+            }
+            !startedInPanel && !triggered && !cancelled && releasedInCover -> {
+                // 短按封面只让外层公共组件显示操作提示；歌名/时间保持原状态。
+                onCoverShortTap?.invoke()
+                performClick()
+            }
+        }
+    }
+
+    private fun cancelCoverTouch() {
+        if (!coverTouchActive) return
+        coverTouchActive = false
+        coverTouchStartedInPanel = false
+        coverHoldTriggered = false
+        coverHoldCancelled = false
+        cancelCoverHold(markCancelled = false)
+    }
+
     override fun performClick(): Boolean {
         super.performClick()
         return true
@@ -2572,11 +2636,11 @@ internal class FullLyricView @JvmOverloads constructor(
 
     // ---- 锁定 / 长按解锁 / 拖动调整进度 ----
 
-    /** 锁定态按下歌词：开始 2s 蓄力，到点 [doUnlock] 解锁。 */
+    /** 锁定态按下歌词：开始与封面相同的 1 秒蓄力，到点 [doUnlock] 解锁。 */
     private fun armLongPress() {
         pressArmAt = SystemClock.elapsedRealtime()
         handler.removeCallbacks(unlockRunnable)
-        handler.postDelayed(unlockRunnable, UNLOCK_HOLD_MS)
+        handler.postDelayed(unlockRunnable, REAR_LONG_PRESS_MS)
         invalidate()
     }
 
@@ -2739,7 +2803,7 @@ internal class FullLyricView @JvmOverloads constructor(
     private fun reportLockVisual(now: Long) {
         val cb = onLockVisual ?: return
         if (pressArmAt != 0L) {
-            val p = ((now - pressArmAt) / UNLOCK_HOLD_MS.toFloat()).coerceIn(0f, 1f)
+            val p = ((now - pressArmAt) / REAR_LONG_PRESS_MS.toFloat()).coerceIn(0f, 1f)
             cb(true, p, 1f, 0f, 0.5f + 0.5f * p)
             lockReported = true
             return

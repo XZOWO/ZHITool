@@ -15,6 +15,10 @@ data class NotifyPayload(
     val title: String,
     val text: String,
     val autoSec: Int,
+    /** SystemUI notification identity and opaque click capability. */
+    val notificationKey: String? = null,
+    val clickToken: String? = null,
+    val openable: Boolean = false,
     val id: Long = System.nanoTime(),
 )
 

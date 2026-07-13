@@ -16,10 +16,13 @@ object SystemUIHooker : PackageHooker() {
 
     override fun onHook() {
         if (!isMainProcess()) return
+        SystemUINotificationBridge.hook(module, classLoader)
         doOnAppCreated { app ->
             Log.i(TAG, "SystemUI created: ${app.packageName}")
             Directory.initialize(app)
             SystemUIMediaUtils.init(app)
+            SystemUIMediaBridge.initialize(app)
+            SystemUINotificationBridge.initialize(app)
             NotificationCoverHelper.initialize(app)
             hostCentralIfNeeded(app)
         }

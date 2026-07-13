@@ -18,10 +18,18 @@ object HookSettings {
     const val PREF = "zhi_hook"
     const val K_GUARD_SUBSCREEN_HOME = "guard_subscreen_home"
     const val K_KEEP_BACKGROUND = "keep_background"
+    const val K_SKIP_LOCK_BACK_HOME = "skip_lock_back_home"
+    const val K_ALLOW_REAR_ACTIVITY = "allow_rear_activity"
+    const val K_DISABLE_DOUBLE_TAP_SLEEP = "disable_double_tap_sleep"
+    const val K_DISABLE_REAR_SCREEN_COVER = "disable_rear_screen_cover"
 
     data class State(
         val guardSubScreenHome: Boolean = true,
         val keepBackground: Boolean = true,
+        val skipLockBackHome: Boolean = false,
+        val allowRearActivity: Boolean = true,
+        val disableDoubleTapSleep: Boolean = true,
+        val disableRearScreenCover: Boolean = false,
     )
 
     private val _flow = MutableStateFlow(State())
@@ -43,6 +51,10 @@ object HookSettings {
         _flow.value = State(
             guardSubScreenHome = sp.getBoolean(K_GUARD_SUBSCREEN_HOME, true),
             keepBackground = sp.getBoolean(K_KEEP_BACKGROUND, true),
+            skipLockBackHome = sp.getBoolean(K_SKIP_LOCK_BACK_HOME, false),
+            allowRearActivity = sp.getBoolean(K_ALLOW_REAR_ACTIVITY, true),
+            disableDoubleTapSleep = sp.getBoolean(K_DISABLE_DOUBLE_TAP_SLEEP, true),
+            disableRearScreenCover = sp.getBoolean(K_DISABLE_REAR_SCREEN_COVER, false),
         )
     }
 
@@ -51,6 +63,10 @@ object HookSettings {
         prefs(context).edit().apply {
             putBoolean(K_GUARD_SUBSCREEN_HOME, state.guardSubScreenHome)
             putBoolean(K_KEEP_BACKGROUND, state.keepBackground)
+            putBoolean(K_SKIP_LOCK_BACK_HOME, state.skipLockBackHome)
+            putBoolean(K_ALLOW_REAR_ACTIVITY, state.allowRearActivity)
+            putBoolean(K_DISABLE_DOUBLE_TAP_SLEEP, state.disableDoubleTapSleep)
+            putBoolean(K_DISABLE_REAR_SCREEN_COVER, state.disableRearScreenCover)
             apply()
         }
     }

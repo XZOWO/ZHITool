@@ -50,7 +50,7 @@ class RearNotificationActivity : ComponentActivity() {
             if (onRear.value) {
                 NotificationCardPage(
                     onExpired = { finish() },
-                    onOpenFront = { pkg -> NotifyActions.openOnFront(this, pkg); finish() },
+                    onOpenFront = { notification -> NotifyActions.openOnFront(this, notification); finish() },
                 )
             }
         }
@@ -92,7 +92,7 @@ class RearNotificationActivity : ComponentActivity() {
 }
 
 @Composable
-private fun NotificationCardPage(onExpired: () -> Unit, onOpenFront: (String) -> Unit) {
+private fun NotificationCardPage(onExpired: () -> Unit, onOpenFront: (NotifyPayload) -> Unit) {
     val density = LocalDensity.current
     val items by NotifyBus.items.collectAsState()
     if (items.isEmpty()) {

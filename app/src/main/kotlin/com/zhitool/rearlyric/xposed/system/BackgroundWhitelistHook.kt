@@ -125,5 +125,5 @@ object BackgroundWhitelistHook {
     private fun isEnabled(module: XposedModule): Boolean =
         runCatching {
             module.getRemotePreferences(PREF).getBoolean(KEY_ENABLED, true)
-        }.getOrDefault(true)
+        }.getOrDefault(false)
 }

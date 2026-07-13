@@ -5,11 +5,11 @@
 package com.zhitool.rearlyric.tools.notify
 
 import android.content.Context
-import com.zhitool.rearlyric.core.RootShell
+import android.content.Intent
 import com.zhitool.rearlyric.tools.overlay.RearOverlaySupport
 import kotlin.concurrent.thread
 
-/** 背屏通知的两个动作：在背屏打开卡片页、在正面打开对应应用。 */
+/** 背屏通知动作：打开卡片页，或请求 SystemUI 执行原通知的点击动作。 */
 object NotifyActions {
     private const val CARD_ACTIVITY = "com.zhitool.rearlyric/.tools.notify.RearNotificationActivity"
 
@@ -21,20 +21,16 @@ object NotifyActions {
         }
     }
 
-    /** 在正面（主屏）打开该通知对应的应用——等效于点击该通知。 */
-    fun openOnFront(context: Context, pkg: String) {
-        thread(name = "zhi-notify-front") {
-            val comp = runCatching {
-                context.packageManager.getLaunchIntentForPackage(pkg)?.component?.flattenToShortString()
-            }.getOrNull()
-            if (comp != null) {
-                // 不带 --display → 落到默认显示（正面）。
-                RootShell.run("am start -n $comp")
-            } else {
-                RootShell.run(
-                    "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p $pkg",
-                )
-            }
-        }
+    /** 原 PendingIntent 留在 SystemUI；这里只回传通知 key + 不可猜测令牌。 */
+    fun openOnFront(context: Context, notification: NotifyPayload) {
+        val key = notification.notificationKey ?: return
+        val token = notification.clickToken ?: return
+        if (!notification.openable) return
+        context.applicationContext.sendBroadcast(
+            Intent(NotificationBridge.ACTION_CLICK)
+                .setPackage(NotificationBridge.SYSTEM_UI_PACKAGE)
+                .putExtra(NotificationBridge.EXTRA_KEY, key)
+                .putExtra(NotificationBridge.EXTRA_CLICK_TOKEN, token)
+        )
     }
 }

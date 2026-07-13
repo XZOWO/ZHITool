@@ -15,8 +15,8 @@ android {
         applicationId = "com.zhitool.rearlyric"
         minSdk = 27
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.0.1"
+        versionCode = 7
+        versionName = "1.0.2"
 
         // 设备为 arm64（Xiaomi 17 系列 / HyperOS 全 64 位）；只打包 arm64 的 DexKit native，
         // 既精简体积，hook 进程（system_server / subscreencenter 均 64 位）也能正确加载。
@@ -63,6 +63,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+
     val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
     implementation(composeBom)
 
