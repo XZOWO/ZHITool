@@ -85,6 +85,9 @@ object RearTools {
     /** 禁用系统背屏 Launcher（防止挤占投放的应用）。 */
     fun disableSubScreenLauncher(): Boolean = RootShell.run("am force-stop $SUBSCREEN_PKG")
 
+    /** 把任务移动到指定 display 另一种方式（作为 failback）。 */
+    fun toSubScreen(taskId: Int, displayId: Int): Boolean = RootShell.run("cmd activity display move-stack $taskId $displayId")
+
     /** 恢复系统背屏 Launcher。 */
     fun enableSubScreenLauncher(): Boolean =
         RootShell.run("am start --display $REAR_DISPLAY_ID -n $SUBSCREEN_PKG/.SubScreenLauncher")
@@ -113,6 +116,16 @@ object RearTools {
         val moved = moveTaskToDisplay(app.taskId, REAR_DISPLAY_ID)
         if (!moved) {
             Log.w(TAG, "moveTaskToDisplay failed for $app")
+            return null
+        }
+        var moved_fb = true
+        // 进行检查，失败则调用 failback
+        if (!isTaskOnDisplay(app.taskId, REAR_DISPLAY_ID)) {
+            moved_fb = toSubScreen(app.taskId, REAR_DISPLAY_ID)
+        }
+        // failback 失败，返回 null
+        if (!moved_fb) {
+            Log.w(TAG, "toSubScreen failed for $app")
             return null
         }
         wakeRear()
